@@ -41,12 +41,18 @@ done
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 say(){ printf '\033[36m[setup-node]\033[0m %s\n' "$*"; }
 
+# sudo wrapper — normally interactive; set CRAWLFAST_SUDO_PASS to run non-interactively (automation
+# over SSH). Commands must NOT read stdin themselves (we feed the password there).
+_sudo(){
+  if [ -n "${CRAWLFAST_SUDO_PASS:-}" ]; then printf '%s\n' "$CRAWLFAST_SUDO_PASS" | sudo -S -p '' "$@"
+  else sudo "$@"; fi
+}
+
 # 1. Prerequisites — only install what's missing.
-need_pkg(){ command -v "$1" >/dev/null 2>&1; }
 install_pkgs(){
   local pkgs="$*"
-  if command -v apt-get >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y -qq $pkgs
-  elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y -q $pkgs
+  if command -v apt-get >/dev/null 2>&1; then _sudo apt-get update -qq && _sudo apt-get install -y -qq $pkgs
+  elif command -v dnf >/dev/null 2>&1; then _sudo dnf install -y -q $pkgs
   elif command -v brew >/dev/null 2>&1; then brew install $pkgs
   else echo "WARN: no known package manager; install manually: $pkgs" >&2; fi
 }
@@ -90,7 +96,8 @@ case "$MODE" in
   service)
     UNIT=/etc/systemd/system/crawlfast-worker.service
     say "installing systemd service $UNIT"
-    sudo tee "$UNIT" >/dev/null <<UNITEOF
+    TMP="$(mktemp)"
+    cat > "$TMP" <<UNITEOF
 [Unit]
 Description=crawlfast external worker ($NAME)
 After=network-online.target
@@ -107,8 +114,9 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 UNITEOF
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now crawlfast-worker.service
+    _sudo cp "$TMP" "$UNIT" && rm -f "$TMP"   # temp-file + cp so sudo's stdin stays free for the password
+    _sudo systemctl daemon-reload
+    _sudo systemctl enable --now crawlfast-worker.service
     say "service enabled + started. Logs: journalctl -u crawlfast-worker -f"
     ;;
 esac
