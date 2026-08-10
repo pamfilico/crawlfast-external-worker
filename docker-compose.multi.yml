@@ -1,0 +1,25 @@
+# Two (or more) DISTINCT worker nodes on one machine — each with its OWN api_key/identity, so they
+# show up as separate workers in the fleet monitor. Provision one key per node server-side, then:
+#
+#   export CRAWLFAST_WORKER_API_BASE_URL=http://192.168.1.10:5053
+#   export WORKER1_KEY=cfw_...   WORKER2_KEY=cfw_...
+#   docker compose -f docker-compose.multi.yml up --build
+#
+# Add worker-3, worker-4, … by copying a block with its own key. For N identical pullers under ONE
+# key instead, use the default docker-compose.yml with `--scale worker=N`.
+services:
+  worker-1:
+    build: .
+    restart: unless-stopped
+    environment:
+      CRAWLFAST_WORKER_API_BASE_URL: "${CRAWLFAST_WORKER_API_BASE_URL}"
+      CRAWLFAST_WORKER_API_KEY: "${WORKER1_KEY}"
+      CRAWLFAST_WORKER_NAME: "node-1"
+
+  worker-2:
+    build: .
+    restart: unless-stopped
+    environment:
+      CRAWLFAST_WORKER_API_BASE_URL: "${CRAWLFAST_WORKER_API_BASE_URL}"
+      CRAWLFAST_WORKER_API_KEY: "${WORKER2_KEY}"
+      CRAWLFAST_WORKER_NAME: "node-2"

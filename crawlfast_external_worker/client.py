@@ -58,6 +58,19 @@ class CrawlfastWorkerClient:
         data = self._data(resp)
         return (data or {}).get("task")
 
+    def report_progress(self, task_id: str, done: int, total: int, current_url: str = None,
+                        title: str = None) -> None:
+        """Best-effort incremental progress ping (drives the live monitor). Never raises."""
+        try:
+            requests.post(
+                f"{self.base}/api/v1/external-worker/tasks/{task_id}/progress",
+                json={"done": done, "total": total, "current_url": current_url, "title": title},
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+        except Exception:  # noqa: BLE001 — progress is advisory, never fail the crawl over it
+            pass
+
     def submit_result(self, task_id: str, status: str, result=None, error: str = None) -> dict:
         resp = requests.post(
             f"{self.base}/api/v1/external-worker/tasks/{task_id}/result",

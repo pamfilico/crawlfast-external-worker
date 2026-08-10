@@ -1,12 +1,19 @@
-# Run the worker on a node. On the laptop:
+# Run one or more worker processes on a node. On the laptop:
 #   1) cp config.example.yaml config.yaml  &&  edit api_base_url + api_key
-#   2) docker compose up --build
+#   2) docker compose up --build                     # 1 worker
+#      docker compose up --build --scale worker=4     # 4 concurrent workers (same node/key)
 #
-# Or inject config purely via env (no file): set CRAWLFAST_WORKER_API_BASE_URL / _API_KEY below.
+# Scaling: there is NO container_name, so `--scale worker=N` spawns N processes. They share the
+# node's api_key and all poll the same queue; task claims are atomic (FOR UPDATE SKIP LOCKED) so no
+# task is ever processed twice — you just get N× throughput for this node. To run DISTINCT nodes
+# (each its own key/identity, e.g. one per laptop), give each its own config.yaml / key and run a
+# separate compose project (`docker compose -p node2 up`), or see docker-compose.multi.yml.
+#
+# Config comes from config.yaml (mounted) or CRAWLFAST_WORKER_* env — nothing else. The worker
+# speaks ONLY REST to the API; it knows nothing about the backend's environment.
 services:
   worker:
     build: .
-    container_name: crawlfast_external_worker
     restart: unless-stopped
     environment:
       # Uncomment to configure without a YAML file:

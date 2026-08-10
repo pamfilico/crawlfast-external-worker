@@ -48,10 +48,24 @@ def run_cycle(client: CrawlfastWorkerClient, cfg) -> bool:
 
     task_id = task["id"]
     log.info("claimed task %s (%s) payload=%s", task_id, task.get("task_type"), task.get("payload"))
+
+    # Throttle progress pings to ~1/sec so a big crawl doesn't hammer the API.
+    _last = [0.0]
+
+    def on_progress(done, total, current_url=None, title=None):
+        now = time.time()
+        if now - _last[0] < 1.0 and done != total:
+            return
+        _last[0] = now
+        log.info("  progress %s/%s %s", done, total, current_url or "")
+        client.report_progress(task_id, done=done, total=total, current_url=current_url, title=title)
+
     try:
-        result = execute(task, cfg)
+        result = execute(task, cfg, on_progress=on_progress)
         client.submit_result(task_id, status="succeeded", result=result)
-        log.info("task %s succeeded", task_id)
+        pages = result.get("pages_crawled")
+        log.info("task %s succeeded%s", task_id,
+                 f" — {pages} pages in {result.get('elapsed_seconds')}s" if pages is not None else "")
     except Exception as exc:  # noqa: BLE001 — any failure is reported, never crashes the loop
         log.exception("task %s failed", task_id)
         client.submit_result(task_id, status="failed", error=str(exc))
