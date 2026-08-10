@@ -35,15 +35,16 @@ def _setup_logging():
     )
 
 
-def run_cycle(client: CrawlfastWorkerClient, cfg) -> bool:
-    """One heartbeat + (at most) one task. Returns True if a task was processed."""
+def heartbeat(client: CrawlfastWorkerClient) -> str:
     hb = client.heartbeat(worker_version=__version__, capabilities=supported_task_types())
-    worker_name = (hb or {}).get("worker", {}).get("name", "?")
-    log.info("heartbeat ok — identified as %s", worker_name)
+    return (hb or {}).get("worker", {}).get("name", "?")
 
+
+def process_one(client: CrawlfastWorkerClient, cfg) -> bool:
+    """Claim (at most) one task and run it. Returns True if a task was processed. No heartbeat here —
+    the loop heartbeats on its own cadence so draining a queue isn't throttled by heartbeat cost."""
     task = client.claim_task()
     if not task:
-        log.info("no pending tasks")
         return False
 
     task_id = task["id"]
@@ -95,25 +96,34 @@ def main(argv=None) -> int:
 
     if args.once:
         try:
-            run_cycle(client, cfg)
+            log.info("identified as %s", heartbeat(client))
+            if not process_one(client, cfg):
+                log.info("no pending tasks")
             return 0
         except WorkerApiError as exc:
             log.error("cycle failed: %s", exc)
             return 1
 
-    # long-running loop
-    log.info("entering poll loop (every %ss); Ctrl-C to stop", cfg.poll_interval_seconds)
+    # Long-running loop. DRAIN greedily: keep claiming back-to-back while there's work (this is what
+    # makes a distributed crawl fast — no sleep between pages). Heartbeat only every ~10s, and sleep
+    # the poll interval only when the queue is empty.
+    log.info("entering poll loop (drain mode, poll every %ss); Ctrl-C to stop", cfg.poll_interval_seconds)
+    hb_interval = min(10.0, max(2.0, cfg.poll_interval_seconds))
+    last_hb = 0.0
     while True:
         try:
-            processed = run_cycle(client, cfg)
+            now = time.time()
+            if now - last_hb >= hb_interval:
+                log.info("identified as %s", heartbeat(client))
+                last_hb = now
+            if not process_one(client, cfg):
+                time.sleep(cfg.poll_interval_seconds)  # idle — wait before polling again
         except WorkerApiError as exc:
             log.error("api error: %s", exc)
-            processed = False
+            time.sleep(cfg.poll_interval_seconds)
         except KeyboardInterrupt:
             log.info("stopping")
             return 0
-        # If we just did work, poll again quickly; if idle, wait the full interval.
-        time.sleep(0.5 if processed else cfg.poll_interval_seconds)
 
 
 if __name__ == "__main__":
