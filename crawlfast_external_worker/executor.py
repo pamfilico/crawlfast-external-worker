@@ -31,6 +31,24 @@ _HREF_RE = re.compile(r'href=["\']([^"\'#]+)["\']', re.IGNORECASE)
 _UA = {"User-Agent": "crawlfast-external-worker/0.2 (+node-crawl)"}
 _SKIP_EXT = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".zip", ".mp4",
              ".css", ".js", ".ico", ".xml", ".json", ".woff", ".woff2", ".ttf")
+# Path prefixes that are never real pages (infra/asset routes) — skip to avoid junk 404s.
+_SKIP_PREFIXES = ("/cdn-cgi/", "/wp-json/", "/xmlrpc.php", "/feed")
+
+
+def _normalize_url(url: str) -> str:
+    """Canonicalize a discovered URL so the BFS doesn't invent 404s and doesn't double-crawl.
+
+    Collapses immediately-repeated path segments (``/en/en/company.php`` → ``/en/company.php``) —
+    a common relative-link quirk that otherwise 404s — strips the fragment and any trailing slash,
+    and preserves the query. Idempotent."""
+    p = urlparse(url)
+    out = []
+    for seg in p.path.split("/"):
+        if seg and out and out[-1] == seg:
+            continue  # drop the duplicate (/en/en/ -> /en/)
+        out.append(seg)
+    path = "/".join(out).rstrip("/")
+    return f"{p.scheme}://{p.netloc}{path}" + (f"?{p.query}" if p.query else "")
 
 _HANDLERS: dict[str, callable] = {}
 
@@ -81,10 +99,15 @@ def _same_host_links(html: str, base_url: str, host: str) -> list[str]:
     links = []
     for href in _HREF_RE.findall(html or ""):
         try:
-            absu = urljoin(base_url, href).split("#")[0].rstrip("/")
+            if href.strip().lower().startswith(("mailto:", "tel:", "javascript:", "data:")):
+                continue
+            absu = _normalize_url(urljoin(base_url, href).split("#")[0])
             p = urlparse(absu)
-            if p.scheme in ("http", "https") and p.netloc == host and not absu.lower().endswith(_SKIP_EXT):
-                links.append(absu)
+            if p.scheme not in ("http", "https") or p.netloc != host:
+                continue
+            if absu.lower().endswith(_SKIP_EXT) or any(p.path.startswith(pre) for pre in _SKIP_PREFIXES):
+                continue
+            links.append(absu)
         except Exception:  # noqa: BLE001
             continue
     return links
@@ -116,7 +139,7 @@ def full_crawl(task: dict, cfg, on_progress=None) -> dict:
 
     started = time.time()
     seen: set[str] = set()
-    queue: list[str] = [start_url.rstrip("/")]
+    queue: list[str] = [_normalize_url(start_url)]
     pages: list[dict] = []
     errors = 0
 
