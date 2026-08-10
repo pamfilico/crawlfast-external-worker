@@ -42,6 +42,24 @@ export WORKER1_KEY=cfw_...  WORKER2_KEY=cfw_...
 docker compose -f docker-compose.multi.yml up --build   # node-1 + node-2
 ```
 
+## Provision a node from scratch (old or new machine)
+
+One repeatable command turns a bare Linux/macOS box into a running node — installs prereqs, writes
+`config.yaml`, and (with `--service`) installs a systemd service that runs on boot and auto-restarts:
+
+```bash
+# fresh machine (no git yet) — Debian/Ubuntu:
+sudo apt-get update && sudo apt-get install -y git
+git clone https://github.com/pamfilico/crawlfast-external-worker.git
+cd crawlfast-external-worker
+./setup-node.sh --api-url http://192.168.1.47:5099 --api-key cfw_XXX --name node-1 --service
+```
+`setup-node.sh` is idempotent (re-run to update/reconfigure). Drop `--service` to run in the
+foreground, or use `--once` for a single cron-style cycle. Deps are reused if already present, else
+a venv (or `pip --user`) is created — no manual Python setup.
+
+Manage the service: `journalctl -u crawlfast-worker -f` · `systemctl restart crawlfast-worker`.
+
 ## Configure
 
 ```bash
