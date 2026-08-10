@@ -18,10 +18,29 @@ Each cycle the worker:
 
 Auth is the `X-Worker-Api-Key` header on every call.
 
-v1's executor is a **lightweight real fetch**: it GETs the task's URL and extracts the page title +
-meta tags — enough to prove the whole loop end-to-end before wiring up the full browser crawl. See
-`crawlfast_external_worker/executor.py` for the extension point to reach parity with the internal
-Playwright worker later.
+The executor (no browser, pure `requests`):
+- **`crawl_single` / `extract_meta`** — fetch one page, extract title + meta.
+- **`crawl_all` / `crawl` / `crawl_sitemap`** — **BFS the whole site**: follow same-host links and
+  crawl every page up to `payload.max_pages` (default 50), streaming incremental progress and
+  returning `pages_crawled` + `elapsed_ms` (the total time to clone the site).
+
+See `crawlfast_external_worker/executor.py` for the extension point to reach parity with the
+internal Playwright worker later — same handler signature.
+
+## Scaling — run 2+ workers
+
+```bash
+docker compose up --build --scale worker=4      # 4 concurrent pullers, one node/key
+```
+No `container_name`, so `--scale` just works. All replicas share this node's key and poll the same
+queue; claims are atomic (`FOR UPDATE SKIP LOCKED`) so no task is ever processed twice — you get N×
+throughput. For **distinct nodes** (separate identities, e.g. one per laptop) each with its own key:
+
+```bash
+export CRAWLFAST_WORKER_API_BASE_URL=http://192.168.1.10:5053
+export WORKER1_KEY=cfw_...  WORKER2_KEY=cfw_...
+docker compose -f docker-compose.multi.yml up --build   # node-1 + node-2
+```
 
 ## Configure
 
