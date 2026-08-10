@@ -1,0 +1,19 @@
+# Run the worker on a node. On the laptop:
+#   1) cp config.example.yaml config.yaml  &&  edit api_base_url + api_key
+#   2) docker compose up --build
+#
+# Or inject config purely via env (no file): set CRAWLFAST_WORKER_API_BASE_URL / _API_KEY below.
+services:
+  worker:
+    build: .
+    container_name: crawlfast_external_worker
+    restart: unless-stopped
+    environment:
+      # Uncomment to configure without a YAML file:
+      # CRAWLFAST_WORKER_API_BASE_URL: "http://192.168.1.10:5053"
+      # CRAWLFAST_WORKER_API_KEY: "cfw_REPLACE_ME"
+      CRAWLFAST_WORKER_CONFIG: "/app/config.yaml"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    # default command = long-running poll loop. For a one-shot (cron-style) run:
+    #   docker compose run --rm worker --once

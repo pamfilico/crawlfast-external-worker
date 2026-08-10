@@ -1,0 +1,15 @@
+# crawlfast external worker — node config.
+# Copy to config.yaml and fill in. This is the ONLY thing the node needs to know.
+
+# Where to reach the crawlfast API.
+#   local test  : http://192.168.1.10:5053   (the machine running the backend, on the LAN)
+#   cloud later : https://api.crawlfa.st
+api_base_url: "http://192.168.1.10:5053"
+
+# This worker's own key — provisioned server-side (worker A gets key A).
+api_key: "cfw_REPLACE_ME"
+
+# Optional
+worker_name: "crawlfast-node1"
+poll_interval_seconds: 5
+request_timeout_seconds: 30
