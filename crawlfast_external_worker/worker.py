@@ -128,12 +128,14 @@ def main(argv=None) -> int:
                 # crawled elsewhere — so retry FAST for a while before backing off to poll_interval.
                 idle += 1
                 time.sleep(0.3 if idle < 20 else cfg.poll_interval_seconds)
-        except WorkerApiError as exc:
-            log.error("api error: %s", exc)
-            time.sleep(cfg.poll_interval_seconds)
         except KeyboardInterrupt:
             log.info("stopping")
             return 0
+        except Exception as exc:  # noqa: BLE001 — NEVER crash the node: API errors, dropped
+            # connections (e.g. a server reload), timeouts — log and keep polling.
+            log.warning("transient error, continuing: %s", exc)
+            last_hb = 0.0  # force a re-heartbeat next loop
+            time.sleep(cfg.poll_interval_seconds)
 
 
 if __name__ == "__main__":

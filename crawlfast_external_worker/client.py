@@ -22,7 +22,15 @@ class CrawlfastWorkerClient:
     def _headers(self) -> dict:
         return {"X-Worker-Api-Key": self.api_key, "Content-Type": "application/json"}
 
-    def _data(self, resp: requests.Response) -> dict:
+    def _send(self, method: str, path: str, auth: bool = True, **kw):
+        """One place for every HTTP call — wraps connection/timeout errors + HTTP/envelope errors
+        as WorkerApiError, and returns the envelope's ``data``."""
+        url = f"{self.base}{path}"
+        headers = self._headers() if auth else None
+        try:
+            resp = requests.request(method, url, headers=headers, timeout=self.timeout, **kw)
+        except requests.exceptions.RequestException as exc:  # connection dropped, timeout, DNS, …
+            raise WorkerApiError(f"request to {path} failed: {exc}")
         try:
             body = resp.json()
         except ValueError:
@@ -33,29 +41,16 @@ class CrawlfastWorkerClient:
 
     def health(self) -> dict:
         """Unauthenticated liveness of the worker endpoint group."""
-        resp = requests.get(f"{self.base}/api/v1/external-worker/health", timeout=self.timeout)
-        return self._data(resp)
+        return self._send("GET", "/api/v1/external-worker/health", auth=False)
 
     def heartbeat(self, worker_version: str = "", capabilities: list | None = None) -> dict:
         payload = {"worker_version": worker_version}
         if capabilities is not None:
             payload["capabilities"] = capabilities
-        resp = requests.post(
-            f"{self.base}/api/v1/external-worker/heartbeat",
-            json=payload,
-            headers=self._headers(),
-            timeout=self.timeout,
-        )
-        return self._data(resp)
+        return self._send("POST", "/api/v1/external-worker/heartbeat", json=payload)
 
     def claim_task(self) -> dict | None:
-        resp = requests.post(
-            f"{self.base}/api/v1/external-worker/tasks/claim",
-            json={},
-            headers=self._headers(),
-            timeout=self.timeout,
-        )
-        data = self._data(resp)
+        data = self._send("POST", "/api/v1/external-worker/tasks/claim", json={})
         return (data or {}).get("task")
 
     def report_progress(self, task_id: str, done: int, total: int, current_url: str = None,
@@ -72,10 +67,7 @@ class CrawlfastWorkerClient:
             pass
 
     def submit_result(self, task_id: str, status: str, result=None, error: str = None) -> dict:
-        resp = requests.post(
-            f"{self.base}/api/v1/external-worker/tasks/{task_id}/result",
+        return self._send(
+            "POST", f"/api/v1/external-worker/tasks/{task_id}/result",
             json={"status": status, "result": result, "error": error},
-            headers=self._headers(),
-            timeout=self.timeout,
         )
-        return self._data(resp)
