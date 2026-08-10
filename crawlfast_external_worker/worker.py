@@ -112,7 +112,7 @@ def main(argv=None) -> int:
     # makes a distributed crawl fast — no sleep between pages). Heartbeat only every ~10s, and sleep
     # the poll interval only when the queue is empty.
     log.info("entering poll loop (drain mode, poll every %ss); Ctrl-C to stop", cfg.poll_interval_seconds)
-    hb_interval = min(10.0, max(2.0, cfg.poll_interval_seconds))
+    hb_interval = max(10.0, cfg.poll_interval_seconds)  # heartbeat ~every 10s, never per-task
     last_hb = 0.0
     idle = 0
     while True:
