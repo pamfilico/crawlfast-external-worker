@@ -115,15 +115,24 @@ def _same_host_links(html: str, base_url: str, host: str) -> list[str]:
 
 @handler("crawl_single", "crawl_single:meta", "extract_meta")
 def lite_fetch(task: dict, cfg, on_progress=None) -> dict:
-    """Fetch one page and extract title + meta."""
-    url = (task.get("payload") or {}).get("url")
+    """Fetch one page and extract title + meta.
+
+    In a DISTRIBUTED site crawl the server sends ``payload.discover=true``; we then also return the
+    page's same-host links as ``discovered_links`` so the server can fan them out to other nodes.
+    The worker stays dumb: it just reports what it found — the server owns dedup + scheduling."""
+    payload = task.get("payload") or {}
+    url = payload.get("url")
     if not url:
         raise ValueError("task payload has no 'url'")
     page = _fetch(url, cfg)
-    page.pop("_html", None)
+    html = page.pop("_html", "")
+    out = {**page, "engine": "lite-fetch", "node": socket.gethostname(), "task_type": task.get("task_type")}
+    if payload.get("discover"):
+        host = urlparse(page["final_url"]).netloc
+        out["discovered_links"] = _same_host_links(html, page["final_url"], host)
     if on_progress:
         on_progress(done=1, total=1, current_url=url, title=page.get("title"))
-    return {**page, "engine": "lite-fetch", "node": socket.gethostname(), "task_type": task.get("task_type")}
+    return out
 
 
 @handler("crawl_all", "crawl", "crawl_sitemap")
