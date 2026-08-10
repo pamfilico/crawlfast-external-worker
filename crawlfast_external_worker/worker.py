@@ -50,10 +50,14 @@ def process_one(client: CrawlfastWorkerClient, cfg) -> bool:
     task_id = task["id"]
     log.info("claimed task %s (%s) payload=%s", task_id, task.get("task_type"), task.get("payload"))
 
-    # Throttle progress pings to ~1/sec so a big crawl doesn't hammer the API.
+    # Progress pings drive the monitor for MULTI-page tasks. Skip them for single-page tasks
+    # (total<=1) — in a distributed crawl every page is its own task, and an extra round-trip per
+    # page would just add latency. Throttle the rest to ~1/sec.
     _last = [0.0]
 
     def on_progress(done, total, current_url=None, title=None):
+        if (total or 1) <= 1:
+            return
         now = time.time()
         if now - _last[0] < 1.0 and done != total:
             return
@@ -110,14 +114,20 @@ def main(argv=None) -> int:
     log.info("entering poll loop (drain mode, poll every %ss); Ctrl-C to stop", cfg.poll_interval_seconds)
     hb_interval = min(10.0, max(2.0, cfg.poll_interval_seconds))
     last_hb = 0.0
+    idle = 0
     while True:
         try:
             now = time.time()
             if now - last_hb >= hb_interval:
                 log.info("identified as %s", heartbeat(client))
                 last_hb = now
-            if not process_one(client, cfg):
-                time.sleep(cfg.poll_interval_seconds)  # idle — wait before polling again
+            if process_one(client, cfg):
+                idle = 0  # got work — loop straight back to claim the next (no sleep)
+            else:
+                # Empty right now, but a running job's frontier refills within ~1s as pages get
+                # crawled elsewhere — so retry FAST for a while before backing off to poll_interval.
+                idle += 1
+                time.sleep(0.3 if idle < 20 else cfg.poll_interval_seconds)
         except WorkerApiError as exc:
             log.error("api error: %s", exc)
             time.sleep(cfg.poll_interval_seconds)
