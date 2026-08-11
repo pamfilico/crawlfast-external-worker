@@ -17,3 +17,7 @@ services:
       CRAWLFAST_WORKER_CONFIG: "/app/config.yaml"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      # Host avahi socket → so nss-mdns in the container can resolve `.local` names (avahi-daemon
+      # owns udp/5353 on the host, so standalone in-container mDNS can't; it must use this socket).
+      # Harmless if the host has no avahi (file just won't exist / won't be used).
+      - /run/avahi-daemon/socket:/run/avahi-daemon/socket
