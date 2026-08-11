@@ -1,26 +1,19 @@
-# Run one or more worker processes on a node. On the laptop:
-#   1) cp config.example.yaml config.yaml  &&  edit api_base_url + api_key
-#   2) docker compose up --build                     # 1 worker
-#      docker compose up --build --scale worker=4     # 4 concurrent workers (same node/key)
+# Run the worker on a node (laptop / Raspberry Pi). Usually driven by bootstrap.sh, but manual is:
+#   cp config.example.yaml config.yaml  &&  edit api_base_url + api_key
+#   docker compose up -d --build
 #
-# Scaling: there is NO container_name, so `--scale worker=N` spawns N processes. They share the
-# node's api_key and all poll the same queue; task claims are atomic (FOR UPDATE SKIP LOCKED) so no
-# task is ever processed twice — you just get N× throughput for this node. To run DISTINCT nodes
-# (each its own key/identity, e.g. one per laptop), give each its own config.yaml / key and run a
-# separate compose project (`docker compose -p node2 up`), or see docker-compose.multi.yml.
+# network_mode: host — so the container resolves `.local` names (the API box) via the LAN and has no
+# ports to bind (the worker is outbound-only). This also lets you point api_base_url at
+# http://<host>.local:5099 and survive the server's IP drifting.
 #
-# Config comes from config.yaml (mounted) or CRAWLFAST_WORKER_* env — nothing else. The worker
-# speaks ONLY REST to the API; it knows nothing about the backend's environment.
+# Scale N pullers on one node (host networking is fine — no ports bound):
+#   docker compose up -d --build --scale worker=4
 services:
   worker:
     build: .
-    restart: unless-stopped
+    restart: unless-stopped          # + `systemctl enable docker` ⇒ survives reboot
+    network_mode: host
     environment:
-      # Uncomment to configure without a YAML file:
-      # CRAWLFAST_WORKER_API_BASE_URL: "http://192.168.1.10:5053"
-      # CRAWLFAST_WORKER_API_KEY: "cfw_REPLACE_ME"
       CRAWLFAST_WORKER_CONFIG: "/app/config.yaml"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-    # default command = long-running poll loop. For a one-shot (cron-style) run:
-    #   docker compose run --rm worker --once
