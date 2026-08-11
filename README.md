@@ -112,13 +112,13 @@ Ask the crawlfast API (needs the admin secret `EXTERNAL_WORKER_ADMIN_SECRET`):
 
 ```bash
 # create a worker + get its key (shown once)
-curl -sX POST http://<backend>/api/v1/internal/external-workers \
+curl -sX POST http://<backend>/api/v1/cli/nodes \
   -H "X-Crawlfast-Internal-Secret: $EXTERNAL_WORKER_ADMIN_SECRET" \
   -H 'Content-Type: application/json' \
   -d '{"name":"crawlfast-node1"}'
 
 # enqueue a task for workers to pull
-curl -sX POST http://<backend>/api/v1/internal/external-worker-tasks \
+curl -sX POST http://<backend>/api/v1/cli/tasks \
   -H "X-Crawlfast-Internal-Secret: $EXTERNAL_WORKER_ADMIN_SECRET" \
   -H 'Content-Type: application/json' \
   -d '{"task_type":"crawl_single","payload":{"url":"https://example.com"}}'
