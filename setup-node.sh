@@ -116,7 +116,8 @@ WantedBy=multi-user.target
 UNITEOF
     _sudo cp "$TMP" "$UNIT" && rm -f "$TMP"   # temp-file + cp so sudo's stdin stays free for the password
     _sudo systemctl daemon-reload
-    _sudo systemctl enable --now crawlfast-worker.service
-    say "service enabled + started. Logs: journalctl -u crawlfast-worker -f"
+    _sudo systemctl enable crawlfast-worker.service
+    _sudo systemctl restart crawlfast-worker.service   # restart (not just enable --now) so re-runs APPLY config changes
+    say "service enabled + (re)started. Logs: journalctl -u crawlfast-worker -f"
     ;;
 esac
