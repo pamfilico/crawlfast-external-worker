@@ -60,6 +60,18 @@ a venv (or `pip --user`) is created — no manual Python setup.
 
 Manage the service: `journalctl -u crawlfast-worker -f` · `systemctl restart crawlfast-worker`.
 
+### mDNS / `.local` — beat DHCP IP drift
+
+On Linux the provisioner installs **avahi** and aligns the hostname to `--name`, so the node is
+reachable as **`<name>.local`** regardless of its DHCP IP (`ssh crawlfast-node1@crawlfast-node1.local`).
+It also lets the node **resolve other `.local` names** — so point `--api-url` at the API box's mDNS
+name instead of its IP and the node survives the *server's* IP changing too:
+
+```bash
+./setup-node.sh --api-url http://my-macbook.local:5099 --api-key cfw_XXX --name crawlfast-node1 --service
+```
+(macOS advertises `.local` natively via Bonjour — `scutil --get LocalHostName` shows its name.)
+
 ## Configure
 
 ```bash

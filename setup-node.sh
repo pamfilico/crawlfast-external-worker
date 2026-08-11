@@ -58,6 +58,19 @@ install_pkgs(){
 }
 command -v python3 >/dev/null 2>&1 || { say "installing python3"; install_pkgs python3; }
 
+# 1b. mDNS — so the node is reachable as <hostname>.local (survives DHCP IP drift) AND can resolve
+#     other .local names (e.g. the API box). Best-effort; skipped on macOS (Bonjour is built in).
+if command -v apt-get >/dev/null 2>&1 && ! systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+  say "installing mDNS (avahi) so this node is <hostname>.local"
+  install_pkgs avahi-daemon avahi-utils libnss-mdns || say "WARN: avahi install skipped (non-fatal)"
+  _sudo systemctl enable --now avahi-daemon 2>/dev/null || true
+fi
+# If the machine's hostname doesn't match the node name, align it so it advertises <name>.local.
+if [ "$(hostname 2>/dev/null)" != "$NAME" ] && command -v hostnamectl >/dev/null 2>&1; then
+  say "setting hostname to $NAME (advertises $NAME.local)"
+  _sudo hostnamectl set-hostname "$NAME" 2>/dev/null || true
+fi
+
 # 2. Python deps — reuse system libs if already importable (fast path for provisioned boxes),
 #    else create a venv, else pip --user. PYBIN is what the worker runs with.
 PYBIN="python3"
