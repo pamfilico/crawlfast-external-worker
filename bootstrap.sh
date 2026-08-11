@@ -60,9 +60,13 @@ command -v curl >/dev/null 2>&1 || install_pkgs curl ca-certificates
 command -v git  >/dev/null 2>&1 || install_pkgs git
 
 # 2. Docker (official convenience script → uniform across distros + arches incl. Raspberry Pi).
+#    Download to a file then run — piping `curl | _sudo sh` fails because _sudo needs stdin for the
+#    sudo password (the script would never reach sh).
 if ! command -v docker >/dev/null 2>&1; then
   say "installing Docker"
-  curl -fsSL https://get.docker.com | _sudo sh
+  curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+  _sudo sh /tmp/get-docker.sh
+  rm -f /tmp/get-docker.sh
 fi
 _sudo systemctl enable --now docker 2>/dev/null || true
 _sudo usermod -aG docker "$(id -un)" 2>/dev/null || true   # takes effect next login; we use sudo meanwhile
