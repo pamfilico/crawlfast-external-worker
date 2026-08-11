@@ -15,6 +15,7 @@
 set -euo pipefail
 
 API_URL="" ; API_KEY="" ; NAME="$(hostname)" ; POLL="5" ; SCALE="1" ; UNINSTALL=0
+UPDATE_INTERVAL="15" ; NO_CRON=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --api-url) API_URL="$2"; shift 2 ;;
@@ -22,8 +23,10 @@ while [ $# -gt 0 ]; do
     --name)    NAME="$2";    shift 2 ;;
     --poll)    POLL="$2";    shift 2 ;;
     --scale)   SCALE="$2";   shift 2 ;;
+    --update-interval) UPDATE_INTERVAL="$2"; shift 2 ;;  # minutes between self-update runs
+    --no-cron) NO_CRON=1;    shift ;;
     --uninstall) UNINSTALL=1; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -35,12 +38,14 @@ dc(){ _sudo docker compose "$@"; }   # docker needs root until the user's group 
 
 if [ "$UNINSTALL" = 1 ]; then
   say "uninstalling worker"
-  [ -f "$REPO_DIR/docker-compose.yml" ] && dc -f "$REPO_DIR/docker-compose.yml" down --remove-orphans 2>/dev/null || true
-  # also remove the legacy host-python systemd unit if a previous setup-node.sh left one
-  if systemctl list-unit-files 2>/dev/null | grep -q '^crawlfast-worker.service'; then
-    _sudo systemctl disable --now crawlfast-worker.service 2>/dev/null || true
-    _sudo rm -f /etc/systemd/system/crawlfast-worker.service && _sudo systemctl daemon-reload || true
-  fi
+  ( cd "$REPO_DIR" && dc down --remove-orphans ) 2>/dev/null || true   # stop the container(s)
+  _sudo rm -f /etc/cron.d/crawlfast-worker 2>/dev/null || true          # remove self-update cron
+  # remove the legacy host-python systemd unit if a previous setup-node.sh left one
+  _sudo systemctl stop crawlfast-worker.service 2>/dev/null || true
+  _sudo systemctl disable crawlfast-worker.service 2>/dev/null || true
+  _sudo rm -f /etc/systemd/system/crawlfast-worker.service 2>/dev/null || true
+  _sudo systemctl daemon-reload 2>/dev/null || true
+  pkill -f crawlfast_external_worker 2>/dev/null || true                # belt-and-suspenders
   say "done. (Docker + avahi left installed.)"
   exit 0
 fi
@@ -84,6 +89,23 @@ say "wrote config.yaml ($NAME → $API_URL)"
 
 # 5. Up (build the tiny image, run detached, restart-on-boot via compose + docker enabled).
 cd "$REPO_DIR"
+chmod +x self-update.sh 2>/dev/null || true
 dc up -d --build --scale worker="$SCALE" --remove-orphans
 say "worker up (scale=$SCALE). Logs: sudo docker compose logs -f"
+
+# 6. Self-update cron — every $UPDATE_INTERVAL min: git pull, rebuild if changed, self-heal if the
+#    container died. A bad pull can't wedge the node: cron is independent and the next run recovers
+#    (a broken BUILD leaves the last-good container running; push a fix → next run picks it up).
+if [ "$NO_CRON" != 1 ]; then
+  CRON=/etc/cron.d/crawlfast-worker
+  say "installing self-update cron (every ${UPDATE_INTERVAL}m) → $CRON"
+  TMP="$(mktemp)"
+  cat > "$TMP" <<CRONEOF
+# crawlfast worker self-update (managed by bootstrap.sh)
+PATH=/usr/local/bin:/usr/bin:/bin
+*/$UPDATE_INTERVAL * * * * $(id -un) cd $REPO_DIR && ./self-update.sh >> $REPO_DIR/self-update.log 2>&1
+CRONEOF
+  _sudo cp "$TMP" "$CRON" && _sudo chmod 644 "$CRON" && rm -f "$TMP"
+fi
+
 dc ps
