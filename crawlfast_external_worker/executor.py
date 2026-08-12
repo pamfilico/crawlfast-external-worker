@@ -33,6 +33,10 @@ _SKIP_EXT = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".zip", "
              ".css", ".js", ".ico", ".xml", ".json", ".woff", ".woff2", ".ttf")
 # Path prefixes that are never real pages (infra/asset routes) — skip to avoid junk 404s.
 _SKIP_PREFIXES = ("/cdn-cgi/", "/wp-json/", "/xmlrpc.php", "/feed")
+# Asset-combiner / cache routes where the extension lives in the QUERY, e.g.
+# `/css_combine?css_cache=abc.css`, `/min/?f=a.js`. The path has no extension so the path check
+# misses them — match these substrings anywhere in the lowercased URL.
+_SKIP_ASSET_HINTS = ("css_combine", "js_combine", "css_cache", "js_cache", ".css?", ".js?", "ai_skin=")
 
 
 def _normalize_url(url: str) -> str:
@@ -125,7 +129,13 @@ def _same_host_links(html: str, base_url: str, host: str) -> list[str]:
             # Skip static assets by PATH extension — the full URL often carries a cache-busting
             # query (`style.css?ver=3.7.6`), so checking the whole URL misses them and the crawler
             # wastes a full fetch (+ timeout) on every stylesheet/script. Check p.path instead.
-            if p.path.lower().endswith(_SKIP_EXT) or any(p.path.startswith(pre) for pre in _SKIP_PREFIXES):
+            low = absu.lower()
+            qlow = p.query.lower()
+            if (p.path.lower().endswith(_SKIP_EXT)
+                    or any(p.path.startswith(pre) for pre in _SKIP_PREFIXES)
+                    or any(h in low for h in _SKIP_ASSET_HINTS)
+                    # asset extension carried in a query value (e.g. `/min?f=app.js`, `?file=x.css`)
+                    or any(ext in qlow for ext in _SKIP_EXT)):
                 continue
             links.append(absu)
         except Exception:  # noqa: BLE001
