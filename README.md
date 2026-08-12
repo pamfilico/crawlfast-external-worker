@@ -42,6 +42,39 @@ export WORKER1_KEY=cfw_...  WORKER2_KEY=cfw_...
 docker compose -f docker-compose.multi.yml up --build   # node-1 + node-2
 ```
 
+## Enable SSH first (on the target box)
+
+Remote onboarding — the `advertcafe nodes onboard` CLI, or copying `setup-node.sh` over SSH —
+needs the box to already **accept inbound SSH**. A fresh Linux desktop/laptop usually has the SSH
+*client* but not the *server* (`sshd`), so `ssh <box>` is refused. Run this once, sitting at the
+machine, to install + enable `sshd`:
+
+```bash
+# one-liner (no clone needed):
+curl -fsSL https://raw.githubusercontent.com/pamfilico/crawlfast-external-worker/main/setup-ssh.sh | bash
+# or from a clone:  ./setup-ssh.sh
+```
+
+It's idempotent, enables sshd on boot, opens the `ufw` SSH rule if the firewall is on, and prints
+the address(es) to SSH to. The manual equivalents (paste them yourself if you prefer):
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update && sudo apt-get install -y openssh-server
+sudo systemctl enable --now ssh
+
+# Fedora / RHEL / Arch (unit is sshd, not ssh)
+sudo dnf install -y openssh-server   # or: sudo pacman -S openssh
+sudo systemctl enable --now sshd
+
+# macOS — Remote Login
+sudo systemsetup -setremotelogin on  # or System Settings → General → Sharing → Remote Login
+```
+
+Then, from your machine: `advertcafe nodes onboard --host <box>.local --name crawlfast-node2`.
+(Optionally `ssh-copy-id <user>@<box>` first so it's key-based; otherwise the CLI uses `sudo_pass`
+from `~/.advertcaferc`.)
+
 ## Provision a node from scratch (old or new machine)
 
 One repeatable command turns a bare Linux/macOS box into a running node — installs prereqs, writes
