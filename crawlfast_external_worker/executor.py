@@ -80,9 +80,26 @@ def _title(html: str):
 
 def _fetch(url: str, cfg) -> dict:
     started = time.time()
-    resp = requests.get(url, timeout=getattr(cfg, "request_timeout_seconds", 30.0),
-                        headers=_UA, allow_redirects=True)
-    html = resp.text or ""
+    # 12s default (was 30) so a throttling/slow site can't hold a worker hostage for the full crawl.
+    timeout = getattr(cfg, "request_timeout_seconds", 12.0)
+    resp = requests.get(url, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
+    # Only read/parse HTML. A non-HTML response (asset, PDF, binary) that slipped through has no
+    # pages to follow — skip the body so we don't download megabytes or extract junk links.
+    ctype = (resp.headers.get("Content-Type") or "").lower()
+    is_html = "html" in ctype or ctype == ""
+    html = ""
+    if is_html:
+        # Cap the body (~3MB) so a pathological page can't blow up memory/time.
+        chunks, size = [], 0
+        for chunk in resp.iter_content(chunk_size=65536, decode_unicode=True):
+            if not chunk:
+                continue
+            chunks.append(chunk if isinstance(chunk, str) else chunk.decode("utf-8", "ignore"))
+            size += len(chunks[-1])
+            if size > 3_000_000:
+                break
+        html = "".join(chunks)
+    resp.close()
     return {
         "url": url,
         "final_url": resp.url,
@@ -105,7 +122,10 @@ def _same_host_links(html: str, base_url: str, host: str) -> list[str]:
             p = urlparse(absu)
             if p.scheme not in ("http", "https") or p.netloc != host:
                 continue
-            if absu.lower().endswith(_SKIP_EXT) or any(p.path.startswith(pre) for pre in _SKIP_PREFIXES):
+            # Skip static assets by PATH extension — the full URL often carries a cache-busting
+            # query (`style.css?ver=3.7.6`), so checking the whole URL misses them and the crawler
+            # wastes a full fetch (+ timeout) on every stylesheet/script. Check p.path instead.
+            if p.path.lower().endswith(_SKIP_EXT) or any(p.path.startswith(pre) for pre in _SKIP_PREFIXES):
                 continue
             links.append(absu)
         except Exception:  # noqa: BLE001
