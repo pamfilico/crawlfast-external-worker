@@ -34,8 +34,12 @@ _META_RE = re.compile(
 )
 _HREF_RE = re.compile(r'href=["\']([^"\'#]+)["\']', re.IGNORECASE)
 _UA = {"User-Agent": "crawlfast-external-worker/0.2 (+node-crawl)"}
-_SKIP_EXT = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".zip", ".mp4",
-             ".css", ".js", ".ico", ".xml", ".json", ".woff", ".woff2", ".ttf")
+# Non-page extensions to skip. Superset of the native scraper's image/pdf exclusion
+# (.jpg/.jpeg/.png/.gif/.svg/.webp/.ico/.bmp/.tiff/.avif/.pdf) — matched for parity — PLUS the
+# asset types a non-browser GET crawler must skip itself (css/js/fonts/media/data) that the native
+# Playwright crawler never treats as page links.
+_SKIP_EXT = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".bmp", ".tiff", ".avif",
+             ".zip", ".mp4", ".css", ".js", ".ico", ".xml", ".json", ".woff", ".woff2", ".ttf")
 # Path prefixes that are never real pages (infra/asset routes) — skip to avoid junk 404s.
 _SKIP_PREFIXES = ("/cdn-cgi/", "/wp-json/", "/xmlrpc.php", "/feed")
 # Asset-combiner / cache routes where the extension lives in the QUERY, e.g.
