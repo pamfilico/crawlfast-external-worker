@@ -11,6 +11,11 @@ Handlers:
 
 Both parse HTML with no browser (GET + regex). To reach full parity with the internal Playwright
 worker later, register a heavier handler here — same signature.
+
+Content persistence: the node owns NO storage. Every fetched page's full HTML is handed to the
+``on_page`` callback (wired by the worker to POST it to the server, which saves raw.html to S3 and
+creates the Page row — exactly like the native scraper). The returned result stays lightweight
+(per-page metadata only); the HTML never rides back inside it.
 """
 
 from __future__ import annotations
@@ -143,21 +148,39 @@ def _same_host_links(html: str, base_url: str, host: str) -> list[str]:
     return links
 
 
+def _page_summary(page: dict) -> dict:
+    """The lightweight per-page record that rides back in the result (NO html)."""
+    return {k: page.get(k) for k in ("url", "http_status", "title", "content_length", "elapsed_ms")}
+
+
+def _persist(on_page, page: dict, html: str) -> bool:
+    """Hand one page's full HTML to the server (which saves it to S3 + DB). Best-effort: a single
+    failed save is logged by the worker and must not abort the crawl. Returns True when saved."""
+    if on_page is None or not html:
+        return False
+    try:
+        return bool(on_page({**_page_summary(page), "final_url": page.get("final_url"), "html": html}))
+    except Exception:  # noqa: BLE001 — worker's on_page already logs; never break the crawl
+        return False
+
+
 @handler("crawl_single", "crawl_single:meta", "extract_meta")
-def lite_fetch(task: dict, cfg, on_progress=None) -> dict:
-    """Fetch one page and extract title + meta."""
+def lite_fetch(task: dict, cfg, on_progress=None, on_page=None) -> dict:
+    """Fetch one page and extract title + meta, shipping its HTML to the server for persistence."""
     url = (task.get("payload") or {}).get("url")
     if not url:
         raise ValueError("task payload has no 'url'")
     page = _fetch(url, cfg)
-    page.pop("_html", None)
+    html = page.pop("_html", "")
+    saved = _persist(on_page, page, html)
     if on_progress:
         on_progress(done=1, total=1, current_url=url, title=page.get("title"))
-    return {**page, "engine": "lite-fetch", "node": socket.gethostname(), "task_type": task.get("task_type")}
+    return {**page, "engine": "lite-fetch", "node": socket.gethostname(),
+            "task_type": task.get("task_type"), "pages_saved": 1 if saved else 0}
 
 
 @handler("crawl_all", "crawl", "crawl_sitemap")
-def full_crawl(task: dict, cfg, on_progress=None) -> dict:
+def full_crawl(task: dict, cfg, on_progress=None, on_page=None) -> dict:
     """BFS the whole site: crawl every same-host page up to max_pages, reporting progress per page.
     This is the 'clone the whole website' path — total wall-clock is returned as elapsed_ms."""
     payload = task.get("payload") or {}
@@ -172,6 +195,7 @@ def full_crawl(task: dict, cfg, on_progress=None) -> dict:
     queue: list[str] = [_normalize_url(start_url)]
     pages: list[dict] = []
     errors = 0
+    saved = 0
 
     while queue and len(pages) < max_pages:
         url = queue.pop(0)
@@ -181,7 +205,10 @@ def full_crawl(task: dict, cfg, on_progress=None) -> dict:
         try:
             page = _fetch(url, cfg)
             html = page.pop("_html", "")
-            pages.append({k: page[k] for k in ("url", "http_status", "title", "content_length", "elapsed_ms")})
+            # Ship the FULL html to the server to persist (S3 + Page row); keep the summary light.
+            if _persist(on_page, page, html):
+                saved += 1
+            pages.append(_page_summary(page))
             for link in _same_host_links(html, page["final_url"], host):
                 if link not in seen and link not in queue:
                     queue.append(link)
@@ -199,6 +226,7 @@ def full_crawl(task: dict, cfg, on_progress=None) -> dict:
         "node": socket.gethostname(),
         "task_type": task.get("task_type"),
         "pages_crawled": len(pages),
+        "pages_saved": saved,              # pages whose HTML the server persisted (S3 + DB)
         "errors": errors,
         "elapsed_ms": elapsed_ms,          # total time to clone the site (all pages)
         "elapsed_seconds": round(elapsed_ms / 1000, 2),
@@ -207,14 +235,14 @@ def full_crawl(task: dict, cfg, on_progress=None) -> dict:
     }
 
 
-def execute(task: dict, cfg, on_progress=None) -> dict:
+def execute(task: dict, cfg, on_progress=None, on_page=None) -> dict:
     """Dispatch a task to its handler. Raises on unknown type or handler failure (the caller turns
-    that into a ``failed`` result)."""
+    that into a ``failed`` result). ``on_page`` persists each fetched page's HTML via the server."""
     task_type = task.get("task_type")
     fn = _HANDLERS.get(task_type)
     if fn is None:
         raise ValueError(f"no handler registered for task_type={task_type!r}")
-    return fn(task, cfg, on_progress=on_progress)
+    return fn(task, cfg, on_progress=on_progress, on_page=on_page)
 
 
 def supported_task_types() -> list[str]:

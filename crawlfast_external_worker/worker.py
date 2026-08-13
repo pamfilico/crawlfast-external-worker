@@ -65,12 +65,27 @@ def process_one(client: CrawlfastWorkerClient, cfg) -> bool:
         log.info("  progress %s/%s %s", done, total, current_url or "")
         client.report_progress(task_id, done=done, total=total, current_url=current_url, title=title)
 
+    # Persist each page's HTML by shipping it to the server (which owns S3 + DB). Best-effort per
+    # page: a failed save is logged + counted but never aborts the crawl.
+    save_stats = {"saved": 0, "failed": 0}
+
+    def on_page(page):
+        try:
+            client.submit_page(task_id, page)
+            save_stats["saved"] += 1
+            return True
+        except Exception as exc:  # noqa: BLE001
+            save_stats["failed"] += 1
+            log.warning("  page save FAILED for %s: %s", page.get("url"), exc)
+            return False
+
     try:
-        result = execute(task, cfg, on_progress=on_progress)
+        result = execute(task, cfg, on_progress=on_progress, on_page=on_page)
         client.submit_result(task_id, status="succeeded", result=result)
         pages = result.get("pages_crawled")
-        log.info("task %s succeeded%s", task_id,
-                 f" — {pages} pages in {result.get('elapsed_seconds')}s" if pages is not None else "")
+        log.info("task %s succeeded%s (saved=%s failed=%s)", task_id,
+                 f" — {pages} pages in {result.get('elapsed_seconds')}s" if pages is not None else "",
+                 save_stats["saved"], save_stats["failed"])
     except Exception as exc:  # noqa: BLE001 — any failure is reported, never crashes the loop
         log.exception("task %s failed", task_id)
         client.submit_result(task_id, status="failed", error=str(exc))

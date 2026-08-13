@@ -66,6 +66,15 @@ class CrawlfastWorkerClient:
         except Exception:  # noqa: BLE001 — progress is advisory, never fail the crawl over it
             pass
 
+    def submit_page(self, task_id: str, page: dict) -> dict:
+        """Ship ONE crawled page's full HTML back to the server, which saves it to S3 + DB (the node
+        owns no storage). Called per page during a crawl_all. Raises WorkerApiError on failure so the
+        caller can count/log it — a page reported crawled but not saved is the exact bug this fixes."""
+        return self._send(
+            "POST", f"/api/v1/external-worker/tasks/{task_id}/page",
+            json={"page": page},
+        )
+
     def submit_result(self, task_id: str, status: str, result=None, error: str = None) -> dict:
         return self._send(
             "POST", f"/api/v1/external-worker/tasks/{task_id}/result",
