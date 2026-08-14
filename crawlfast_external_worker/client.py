@@ -6,11 +6,28 @@ Every call sends the ``X-Worker-Api-Key`` header. Responses are the standard env
 
 from __future__ import annotations
 
+import os
+import random
+
 import requests
 
 
 class WorkerApiError(Exception):
     pass
+
+
+def _maybe_inject_page_fault():
+    """Fault injection for stress-testing the page spool. When CRAWLFAST_WORKER_FAIL_PCT is set
+    (0-100), submit_page raises a timeout-like error that fraction of the time BEFORE the real POST,
+    so the retry+disk-spool+flush recovery path is actually exercised under failure instead of only
+    on paper. The message is a TRANSIENT signature (no 'not assigned'/'not found'/'404'), so the
+    spool keeps the page and retries it — proving pages are recovered, not lost. Off by default."""
+    try:
+        pct = float(os.getenv("CRAWLFAST_WORKER_FAIL_PCT", "0") or 0)
+    except ValueError:
+        pct = 0.0
+    if pct > 0 and random.random() * 100 < pct:
+        raise WorkerApiError("request to /page failed: simulated POST read timed out (fault injection)")
 
 
 class CrawlfastWorkerClient:
@@ -70,6 +87,7 @@ class CrawlfastWorkerClient:
         """Ship ONE crawled page's full HTML back to the server, which saves it to S3 + DB (the node
         owns no storage). Called per page during a crawl_all. Raises WorkerApiError on failure so the
         caller can count/log it — a page reported crawled but not saved is the exact bug this fixes."""
+        _maybe_inject_page_fault()
         return self._send(
             "POST", f"/api/v1/external-worker/tasks/{task_id}/page",
             json={"page": page},
