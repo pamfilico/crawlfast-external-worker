@@ -36,8 +36,22 @@ def _setup_logging():
     )
 
 
+def _capabilities() -> list[str]:
+    """Task types this worker will claim. Defaults to everything it can run, but can be pinned to a
+    subset via CRAWLFAST_WORKER_TASK_TYPES (comma-separated) — e.g. dedicate a node to crawl_single,
+    or drain a specific task type without touching the rest of the queue."""
+    import os
+
+    supported = supported_task_types()
+    pin = os.getenv("CRAWLFAST_WORKER_TASK_TYPES", "").strip()
+    if not pin:
+        return supported
+    wanted = {t.strip() for t in pin.split(",") if t.strip()}
+    return [t for t in supported if t in wanted] or supported
+
+
 def heartbeat(client: CrawlfastWorkerClient) -> str:
-    hb = client.heartbeat(worker_version=__version__, capabilities=supported_task_types())
+    hb = client.heartbeat(worker_version=__version__, capabilities=_capabilities())
     return (hb or {}).get("worker", {}).get("name", "?")
 
 
