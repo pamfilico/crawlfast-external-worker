@@ -42,23 +42,36 @@ class PageSpool:
         except FileNotFoundError:
             return []
 
-    def submit_with_retry(self, client, task_id: str, page: dict, retries: int = 3) -> bool:
-        """POST a page, retrying with backoff; on final failure, spool it to disk. Returns True only
-        when the server accepted it."""
+    def submit_with_retry(self, client, task_id: str, page: dict, retries: int = 3):
+        """POST a page and return the TRUE outcome — believe the SERVER, not the HTTP status.
+
+        Returns (outcome, info):
+          - ("saved", body)    server persisted it (body.saved is true)
+          - ("rejected", body) server got it but WON'T persist it (403 block page / non-HTML /
+                               empty) — body.saved is false. NOT spooled: retrying can't fix content.
+          - ("spooled", None)  the POST itself failed (server slow/restarting → timeout); written to
+                               disk and retried on the next flush so the page is never lost.
+
+        The old code returned True on any HTTP-200, so a server-rejected page was miscounted as
+        saved (the exact `saved=1` bug this fixes)."""
         delay = 0.5
         for attempt in range(retries):
             try:
-                client.submit_page(task_id, page)
-                return True
-            except Exception as exc:  # noqa: BLE001
+                body = client.submit_page(task_id, page)
+                # body is the server envelope's data: {"saved": bool, "reason": str, ...} (or None)
+                saved = bool(body.get("saved")) if isinstance(body, dict) else True
+                if saved:
+                    return ("saved", body if isinstance(body, dict) else {})
+                return ("rejected", body if isinstance(body, dict) else {})
+            except Exception as exc:  # noqa: BLE001 — transient POST failure: retry, then spool
                 if attempt == retries - 1:
                     self._spool(task_id, page)
-                    log.warning("  page save FAILED (spooled for retry) for %s: %s",
+                    log.warning("  page POST failed (spooled for retry) for %s: %s",
                                 page.get("url"), exc)
-                    return False
+                    return ("spooled", None)
                 time.sleep(delay)
                 delay *= 2
-        return False
+        return ("spooled", None)
 
     def flush(self, client, max_files: int = 100):
         """Re-POST buffered pages. Delete on success, or when the server permanently rejects the page

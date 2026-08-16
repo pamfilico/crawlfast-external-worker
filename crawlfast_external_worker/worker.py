@@ -23,6 +23,7 @@ import time
 from . import __version__
 from .client import CrawlfastWorkerClient, WorkerApiError
 from .page_spool import PageSpool
+from .task_log import TaskLogger
 from .config import load_config
 from .executor import execute, supported_task_types
 
@@ -55,7 +56,7 @@ def heartbeat(client: CrawlfastWorkerClient) -> str:
     return (hb or {}).get("worker", {}).get("name", "?")
 
 
-def process_one(client: CrawlfastWorkerClient, cfg, spool: PageSpool) -> bool:
+def process_one(client: CrawlfastWorkerClient, cfg, spool: PageSpool, tlog: TaskLogger) -> bool:
     """Claim (at most) one task and run it. Returns True if a task was processed. No heartbeat here —
     the loop heartbeats on its own cadence so draining a queue isn't throttled by heartbeat cost."""
     task = client.claim_task()
@@ -80,28 +81,39 @@ def process_one(client: CrawlfastWorkerClient, cfg, spool: PageSpool) -> bool:
         log.info("  progress %s/%s %s", done, total, current_url or "")
         client.report_progress(task_id, done=done, total=total, current_url=current_url, title=title)
 
-    # Persist each page's HTML by shipping it to the server (which owns S3 + DB). Resilient per page:
-    # retry with backoff, and on final failure spool the page to disk so it's re-POSTed later instead
-    # of being silently lost (that's how a task used to "succeed" with pages missing).
-    save_stats = {"saved": 0, "failed": 0}
+    # Persist each page by shipping its HTML to the server (which owns S3 + DB). Count the SERVER'S
+    # verdict, not the HTTP status: 'saved' (persisted), 'rejected' (server won't keep it — a 403
+    # block page / non-HTML; retrying won't help), or 'spooled' (POST failed → disk, retried later).
+    # Every page outcome is also written to a per-client/per-lead JSONL log on the node.
+    stats = {"saved": 0, "rejected": 0, "spooled": 0}
+    tl = tlog.open_task(task)
 
     def on_page(page):
-        if spool.submit_with_retry(client, task_id, page):
-            save_stats["saved"] += 1
-            return True
-        save_stats["failed"] += 1  # spooled for a later flush; not lost
-        return False
+        outcome, info = spool.submit_with_retry(client, task_id, page)
+        stats[outcome] = stats.get(outcome, 0) + 1
+        tl.page(url=page.get("url"), outcome=outcome,
+                reason=(info or {}).get("reason") if isinstance(info, dict) else None,
+                http_status=page.get("http_status"), bytes_=page.get("content_length"),
+                title=page.get("title"))
+        return outcome == "saved"
 
     try:
         result = execute(task, cfg, on_progress=on_progress, on_page=on_page)
         client.submit_result(task_id, status="succeeded", result=result)
         pages = result.get("pages_crawled")
-        log.info("task %s succeeded%s (saved=%s failed=%s)", task_id,
+        tl.summary(status="succeeded", saved=stats["saved"], rejected=stats["rejected"],
+                   spooled=stats["spooled"], pages_crawled=pages or 0,
+                   errors=result.get("errors", 0), elapsed_ms=result.get("elapsed_ms", 0))
+        log.info("task %s succeeded%s (saved=%s rejected=%s spooled=%s)", task_id,
                  f" — {pages} pages in {result.get('elapsed_seconds')}s" if pages is not None else "",
-                 save_stats["saved"], save_stats["failed"])
+                 stats["saved"], stats["rejected"], stats["spooled"])
     except Exception as exc:  # noqa: BLE001 — any failure is reported, never crashes the loop
         log.exception("task %s failed", task_id)
         client.submit_result(task_id, status="failed", error=str(exc))
+        tl.summary(status="failed", saved=stats["saved"], rejected=stats["rejected"],
+                   spooled=stats["spooled"], pages_crawled=0, errors=1, elapsed_ms=0)
+    finally:
+        tl.close()
     return True
 
 
@@ -116,6 +128,7 @@ def main(argv=None) -> int:
     cfg = load_config(args.config)
     client = CrawlfastWorkerClient(cfg.base, cfg.api_key, timeout=cfg.request_timeout_seconds)
     spool = PageSpool()
+    tlog = TaskLogger()
     log.info("crawlfast-external-worker v%s → %s", __version__, cfg.base)
 
     if args.health:
@@ -131,7 +144,7 @@ def main(argv=None) -> int:
         try:
             log.info("identified as %s", heartbeat(client))
             spool.flush(client)
-            if not process_one(client, cfg, spool):
+            if not process_one(client, cfg, spool, tlog):
                 log.info("no pending tasks")
             return 0
         except WorkerApiError as exc:
@@ -152,7 +165,7 @@ def main(argv=None) -> int:
                 log.info("identified as %s", heartbeat(client))
                 last_hb = now
                 spool.flush(client)  # retry any pages a prior timeout spooled to disk
-            if process_one(client, cfg, spool):
+            if process_one(client, cfg, spool, tlog):
                 idle = 0  # got work — loop straight back to claim the next (no sleep)
             else:
                 # Empty right now, but a running job's frontier refills within ~1s as pages get

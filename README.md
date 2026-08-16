@@ -49,6 +49,27 @@ server permanently rejects it (task gone/reassigned). Spool dir: `.page-spool` (
 `CRAWLFAST_WORKER_SPOOL`). To exercise this path on purpose, set `CRAWLFAST_WORKER_FAIL_PCT=<0-100>`
 to make a fraction of page POSTs fail with a transient error (fault injection; off by default).
 
+### Truthful save counts + per-lead/client logs (batch-postable)
+
+The worker counts the **server's verdict**, not the HTTP status: each page is `saved` (persisted to
+S3+DB), `rejected` (server got it but won't keep it — a 403 block page / non-HTML; retrying can't
+help, so it is NOT spooled), or `spooled` (the POST itself failed → disk, retried later). Task logs
+now read e.g. `saved=38 rejected=2 spooled=0` — a page the server refused no longer inflates `saved`.
+
+Every page outcome is also appended to a durable JSONL log on the node under
+`logs/<client_id>/<lead_id>/<task_id>.jsonl` (falling back to `_unfiled/<website_id>/…` when a task
+carries no core ids), with a `_summary` line per task. Each record is self-describing
+(client_id / lead_id / website_id / task_id / url / outcome / reason / bytes). Ship the backlog to the
+server in batches whenever you like:
+
+```bash
+python post_logs.py --dry-run          # show what would be posted
+python post_logs.py                     # POST in batches, then move sent files to logs/_posted/
+python post_logs.py --batch 1000 --url https://api.crawlfa.st
+```
+(Server endpoint `POST /api/v1/external-worker/logs {records:[…]}` is the upload target; until it
+exists, `--dry-run` just reports.)
+
 ## What happens when you queue a task
 
 High-level view — the node **only ever talks to the worker API** (the `/api/v1/external-worker/*`
@@ -221,6 +242,7 @@ Everything can also come from env vars (they win over the file), handy for Docke
 | `CRAWLFAST_WORKER_TASK_TYPES` | comma-separated allow-list to **pin this node** to specific task types (e.g. `crawl_single`); default = everything it can run |
 | `CRAWLFAST_WORKER_SPOOL` | disk-spool dir for failed page POSTs (default `.page-spool`) |
 | `CRAWLFAST_WORKER_FAIL_PCT` | 0–100; inject that % of transient page-POST failures to exercise the spool (testing only, off by default) |
+| `CRAWLFAST_WORKER_LOG_DIR` | dir for per-client/per-lead JSONL result logs (default `logs`) |
 
 ## Run
 
@@ -274,5 +296,5 @@ setup-node.sh (Python service)  bootstrap.sh (Docker)  self-update.sh (cron)  se
 ANDROID-NODE.md (Termux path)
 ```
 
-*Current version: `__version__` in `crawlfast_external_worker/__init__.py` (v0.3.2 — page persistence +
-durable spool + task-type pinning + fault injection).*
+*Current version: `__version__` in `crawlfast_external_worker/__init__.py` (v0.3.3 — page persistence +
+durable spool + task-type pinning + fault injection + truthful save counts + per-lead/client JSONL logs).*

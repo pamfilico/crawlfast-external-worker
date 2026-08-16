@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .venv/
 *.egg-info/
+logs/
+.page-spool/
