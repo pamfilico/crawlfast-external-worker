@@ -21,3 +21,8 @@ services:
       # owns udp/5353 on the host, so standalone in-container mDNS can't; it must use this socket).
       # Harmless if the host has no avahi (file just won't exist / won't be used).
       - /run/avahi-daemon/socket:/run/avahi-daemon/socket
+      # Per-lead/client JSONL result logs + the page spool on a HOST dir shared by every worker
+      # replica — so they survive container rebuilds and `post_logs.py` can upload the whole node's
+      # backlog from one place (each task's file is uniquely named, so replicas never collide).
+      - ./logs:/app/logs
+      - ./.page-spool:/app/.page-spool
