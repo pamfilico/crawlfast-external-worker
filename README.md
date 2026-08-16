@@ -5,27 +5,105 @@ the LAN), give it a URL and an API key, and it will poll the crawlfast API for w
 report back. It knows **nothing** about the backend's database or secrets — its whole world is a
 `config.yaml` with an `api_base_url` and an `api_key`.
 
+> **Got spare Android phones?** They make great nodes, no root needed — see
+> [ANDROID-NODE.md](ANDROID-NODE.md) for the Termux path (and the optional rooting path).
+
 > **Pull-only by design.** The node dials the server; the server never dials the node. So there's
 > nothing to expose, no inbound ports, no tunnel required. Health = "did the node heartbeat
 > recently". (Server→node health/SSH orchestration comes later, once a tunnel/ngrok exists.)
 
 ## How it works
 
-Each cycle the worker:
-1. **heartbeats** — `POST /api/v1/external-worker/heartbeat` (so the server knows it's alive),
-2. **claims** one task — `POST /api/v1/external-worker/tasks/claim` (atomic; nothing if idle),
-3. **executes** it and **reports** — `POST /api/v1/external-worker/tasks/{id}/result`.
+The worker runs a **drain loop**: it **heartbeats on its own ~10 s cadence** (not once per task) and
+otherwise claims work back-to-back for as long as the queue has any, so a distributed crawl runs flat
+out with no sleep between pages. Per task it:
 
+1. **claims** one task — `POST /api/v1/external-worker/tasks/claim` (atomic; nothing if idle),
+2. **executes** it (see the executor below),
+3. **submits each crawled page's HTML** — `POST /api/v1/external-worker/tasks/{id}/page` — which the
+   **server** persists to S3 + a `Page` DB row (the node holds no storage keys; the HTML never comes
+   back to it),
+4. **reports progress** for multi-page tasks — `POST /api/v1/external-worker/tasks/{id}/progress`,
+5. **reports the final result** — `POST /api/v1/external-worker/tasks/{id}/result`.
+
+Heartbeat: `POST /api/v1/external-worker/heartbeat` (sends `worker_version` + the task-type
+`capabilities` this node will claim). Liveness: `GET /api/v1/external-worker/health` (unauth).
 Auth is the `X-Worker-Api-Key` header on every call.
 
-The executor (no browser, pure `requests`):
-- **`crawl_single` / `extract_meta`** — fetch one page, extract title + meta.
+The executor (no browser, pure `requests`) — see `crawlfast_external_worker/executor.py` for the
+handler registry / extension point to reach parity with the internal Playwright worker later:
+- **`crawl_single` / `crawl_single:meta` / `extract_meta`** — fetch one page, extract title + meta,
+  ship its HTML to the server (`pages_saved`).
 - **`crawl_all` / `crawl` / `crawl_sitemap`** — **BFS the whole site**: follow same-host links and
-  crawl every page up to `payload.max_pages` (default 50), streaming incremental progress and
-  returning `pages_crawled` + `elapsed_ms` (the total time to clone the site).
+  crawl every page up to `payload.max_pages` (default 50), skipping static assets (css/js/fonts/media,
+  including query-string-bypassed ones), streaming incremental progress, shipping each page's HTML,
+  and returning `pages_crawled` / `pages_saved` / `errors` / `elapsed_ms` (+ `elapsed_seconds`).
 
-See `crawlfast_external_worker/executor.py` for the extension point to reach parity with the
-internal Playwright worker later — same handler signature.
+### Never lose a page — the durable spool
+
+Persisting a page is best-effort-but-durable (`page_spool.py`): each page POST is **retried with
+backoff**, and if it still fails (server slow/restarting → timeout) the page is written to a local
+**disk spool** and re-POSTed on the next heartbeat/run — so a task never "succeeds" with pages
+silently missing, and spooled pages survive a worker restart. A spooled page is dropped only when the
+server permanently rejects it (task gone/reassigned). Spool dir: `.page-spool` (override with
+`CRAWLFAST_WORKER_SPOOL`). To exercise this path on purpose, set `CRAWLFAST_WORKER_FAIL_PCT=<0-100>`
+to make a fraction of page POSTs fail with a transient error (fault injection; off by default).
+
+## What happens when you queue a task
+
+High-level view — the node **only ever talks to the worker API** (the `/api/v1/external-worker/*`
+endpoints). A **user** queues the crawl; the worker pulls it from that same API. It fetches public web pages
+and hands their HTML back; what the server does with that HTML (store it, index it, whatever) is
+none of the node's business. The node holds **no** storage keys and **no** database — just an
+`api_base_url` and an `api_key`.
+
+### `crawl_all` — clone a whole site
+
+You queue one task with a URL; a single worker crawls **every same-host page** (up to `max_pages`,
+default 50) and hands each page's HTML back to the API.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant API as Worker API
+    participant W as Worker node
+    participant Site as Target website
+
+    User->>API: queue crawl_all { url, max_pages }
+    Note over API: task waits in the queue
+    W->>API: heartbeat + claim next task
+    API-->>W: crawl_all { url, max_pages }
+    loop each same-host page (up to max_pages)
+        W->>Site: GET page
+        Site-->>W: HTML
+        W->>API: send page HTML
+        API-->>W: ok (server persists it — node doesn't know how)
+        W->>API: progress (done / total)
+    end
+    W->>API: result (pages_crawled, elapsed)
+```
+
+### `crawl_single` — one page
+
+Same pull-and-report flow, but the worker fetches **just the one URL** (title + meta), hands its
+HTML back, and finishes.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant API as Worker API
+    participant W as Worker node
+    participant Site as Target website
+
+    User->>API: queue crawl_single { url }
+    W->>API: heartbeat + claim next task
+    API-->>W: crawl_single { url }
+    W->>Site: GET page
+    Site-->>W: HTML
+    W->>API: send page HTML
+    API-->>W: ok (server persists it — node doesn't know how)
+    W->>API: result (title, meta)
+```
 
 ## Scaling — run 2+ workers
 
@@ -93,6 +171,22 @@ a venv (or `pip --user`) is created — no manual Python setup.
 
 Manage the service: `journalctl -u crawlfast-worker -f` · `systemctl restart crawlfast-worker`.
 
+### Docker path — `bootstrap.sh` (+ self-update)
+
+For a **Docker** node instead of a Python service, `bootstrap.sh` installs Docker + mDNS, writes
+`config.yaml`, and `docker compose up -d` — same idempotent, one-command shape (this is what the
+`onboard-crawlfast-node` skill runs remotely):
+
+```bash
+./bootstrap.sh --api-url http://api-box.local:5099 --api-key cfw_XXX --name crawlfast-node2 [--scale N]
+./bootstrap.sh --uninstall
+```
+
+`self-update.sh` (run from cron) `git pull`s and, if the code changed, rebuilds + restarts the
+container — **self-healing**: a commit that breaks the *build* leaves the old container running; one
+that crashes at *runtime* is retried by `restart: unless-stopped`. It also persists the replica
+`--scale` count across updates. Push a fix and the farm converges on its own.
+
 ### mDNS / `.local` — beat DHCP IP drift
 
 On Linux the provisioner installs **avahi** and aligns the hostname to `--name`, so the node is
@@ -115,8 +209,18 @@ cp config.example.yaml config.yaml
 ```
 
 Everything can also come from env vars (they win over the file), handy for Docker/cron:
-`CRAWLFAST_WORKER_API_BASE_URL`, `CRAWLFAST_WORKER_API_KEY`, `CRAWLFAST_WORKER_NAME`,
-`CRAWLFAST_WORKER_POLL_INTERVAL`, `CRAWLFAST_WORKER_TIMEOUT`, `CRAWLFAST_WORKER_CONFIG`.
+
+| Env var | Purpose |
+|---|---|
+| `CRAWLFAST_WORKER_API_BASE_URL` | API base URL (overrides `api_base_url`) |
+| `CRAWLFAST_WORKER_API_KEY` | this node's worker key (overrides `api_key`) |
+| `CRAWLFAST_WORKER_NAME` | node name |
+| `CRAWLFAST_WORKER_POLL_INTERVAL` | seconds to sleep when the queue is empty (default 5) |
+| `CRAWLFAST_WORKER_TIMEOUT` | per-request HTTP timeout (default 30) |
+| `CRAWLFAST_WORKER_CONFIG` | path to `config.yaml` |
+| `CRAWLFAST_WORKER_TASK_TYPES` | comma-separated allow-list to **pin this node** to specific task types (e.g. `crawl_single`); default = everything it can run |
+| `CRAWLFAST_WORKER_SPOOL` | disk-spool dir for failed page POSTs (default `.page-spool`) |
+| `CRAWLFAST_WORKER_FAIL_PCT` | 0–100; inject that % of transient page-POST failures to exercise the spool (testing only, off by default) |
 
 ## Run
 
@@ -160,9 +264,15 @@ curl -sX POST http://<backend>/api/v1/cli/tasks \
 ## Layout
 ```
 crawlfast_external_worker/
-  config.py     load YAML + env → WorkerConfig
-  client.py     HTTP client for the worker API (X-Worker-Api-Key)
-  executor.py   task_type → handler registry (v1 lite fetch; extend for full crawl)
-  worker.py     main loop (--once cron mode, --health)
-config.example.yaml  Dockerfile  docker-compose.yml  requirements.txt
+  config.py       load YAML + env → WorkerConfig
+  client.py       HTTP client for the worker API (X-Worker-Api-Key) + page-fault injection
+  executor.py     task_type → handler registry (lite fetch + BFS crawl_all; on_page → server persists)
+  page_spool.py   durable disk spool: retry page POSTs, buffer failures, flush later (never lose a page)
+  worker.py       drain loop (~10s heartbeat, greedy claim; --once cron mode, --health)
+config.example.yaml  requirements.txt  Dockerfile  docker-compose.yml  docker-compose.multi.yml
+setup-node.sh (Python service)  bootstrap.sh (Docker)  self-update.sh (cron)  setup-ssh.sh (enable sshd)
+ANDROID-NODE.md (Termux path)
 ```
+
+*Current version: `__version__` in `crawlfast_external_worker/__init__.py` (v0.3.2 — page persistence +
+durable spool + task-type pinning + fault injection).*
