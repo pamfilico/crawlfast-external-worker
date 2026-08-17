@@ -27,13 +27,23 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
+import html  # stdlib — decode HTML entities in extracted hrefs (&amp; → &)
+
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _META_RE = re.compile(
     r'<meta[^>]+(?:name|property)=["\']([^"\']+)["\'][^>]+content=["\']([^"\']*)["\']',
     re.IGNORECASE,
 )
 _HREF_RE = re.compile(r'href=["\']([^"\'#]+)["\']', re.IGNORECASE)
-_UA = {"User-Agent": "crawlfast-external-worker/0.2 (+node-crawl)"}
+# Browser-shaped UA: many sites' WAFs 403 a bot-identifying UA (or python-requests) but serve 200
+# to a browser (verified on boatrentalrethymno.gr — bot UA=403, browser UA=200). Crawling public
+# pages with a normal UA is standard; it recovers UA-gated sites that otherwise "fail" with 0 pages.
+_UA = {
+    "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 # Non-page extensions to skip. Superset of the native scraper's image/pdf exclusion
 # (.jpg/.jpeg/.png/.gif/.svg/.webp/.ico/.bmp/.tiff/.avif/.pdf) — matched for parity — PLUS the
 # asset types a non-browser GET crawler must skip itself (css/js/fonts/media/data) that the native
@@ -127,8 +137,12 @@ def _fetch(url: str, cfg) -> dict:
 
 def _same_host_links(html: str, base_url: str, host: str) -> list[str]:
     links = []
-    for href in _HREF_RE.findall(html or ""):
+    for raw_href in _HREF_RE.findall(html or ""):
         try:
+            # Decode HTML entities in the href BEFORE using it: `?a=1&amp;b=2` in the markup is the
+            # URL `?a=1&b=2` — requesting the literal `&amp;` 404s (verified on orfanakisbike.gr,
+            # 41/50 pages lost). Also handles &#38; / &#x26; etc.
+            href = html.unescape(raw_href)
             if href.strip().lower().startswith(("mailto:", "tel:", "javascript:", "data:")):
                 continue
             absu = _normalize_url(urljoin(base_url, href).split("#")[0])
