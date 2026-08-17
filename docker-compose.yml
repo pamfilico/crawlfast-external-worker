@@ -26,3 +26,23 @@ services:
       # backlog from one place (each task's file is uniquely named, so replicas never collide).
       - ./logs:/app/logs
       - ./.page-spool:/app/.page-spool
+
+  # Log pusher — the "cron" as a compose service. Every LOG_PUSH_INTERVAL seconds it uploads each
+  # per-task JSONL under ./logs to object storage (POST /api/v1/external-worker/logs) and DELETES the
+  # local file once the server confirms it was saved. Shares the same host ./logs dir as the worker
+  # replicas, so it drains the whole node's backlog from one place. Same image, so no extra build.
+  log-pusher:
+    build: .
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      CRAWLFAST_WORKER_CONFIG: "/app/config.yaml"
+      LOG_PUSH_INTERVAL: "600"          # seconds between pushes (10 min)
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'while true; do python post_logs.py --config /app/config.yaml || true; sleep "${LOG_PUSH_INTERVAL:-600}"; done'
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - /run/avahi-daemon/socket:/run/avahi-daemon/socket
+      - ./logs:/app/logs
+      - ./.page-spool:/app/.page-spool

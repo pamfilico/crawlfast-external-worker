@@ -15,6 +15,9 @@ services:
       CRAWLFAST_WORKER_API_BASE_URL: "${CRAWLFAST_WORKER_API_BASE_URL}"
       CRAWLFAST_WORKER_API_KEY: "${WORKER1_KEY}"
       CRAWLFAST_WORKER_NAME: "node-1"
+    volumes:
+      - ./logs:/app/logs
+      - ./.page-spool:/app/.page-spool
 
   worker-2:
     build: .
@@ -23,3 +26,23 @@ services:
       CRAWLFAST_WORKER_API_BASE_URL: "${CRAWLFAST_WORKER_API_BASE_URL}"
       CRAWLFAST_WORKER_API_KEY: "${WORKER2_KEY}"
       CRAWLFAST_WORKER_NAME: "node-2"
+    volumes:
+      - ./logs:/app/logs
+      - ./.page-spool:/app/.page-spool
+
+  # Log pusher — the "cron" as a compose service (one drains the shared ./logs dir for all workers).
+  # Uses worker-1's key; every LOG_PUSH_INTERVAL seconds it uploads each per-task JSONL to object
+  # storage and DELETES the local file once the server confirms it was saved.
+  log-pusher:
+    build: .
+    restart: unless-stopped
+    environment:
+      CRAWLFAST_WORKER_API_BASE_URL: "${CRAWLFAST_WORKER_API_BASE_URL}"
+      CRAWLFAST_WORKER_API_KEY: "${WORKER1_KEY}"
+      LOG_PUSH_INTERVAL: "600"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'while true; do python post_logs.py || true; sleep "${LOG_PUSH_INTERVAL:-600}"; done'
+    volumes:
+      - ./logs:/app/logs
+      - ./.page-spool:/app/.page-spool
