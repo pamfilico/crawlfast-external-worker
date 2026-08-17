@@ -99,6 +99,12 @@ def process_one(client: CrawlfastWorkerClient, cfg, spool: PageSpool, tlog: Task
 
     try:
         result = execute(task, cfg, on_progress=on_progress, on_page=on_page)
+        # Fold the SERVER-verdict page stats into the result the server stores, so links_found vs
+        # pages_saved vs pages_rejected (the failure rate) is visible on the task/website too.
+        if isinstance(result, dict):
+            result.setdefault("pages_saved", stats["saved"])
+            result["pages_rejected"] = stats["rejected"]
+            result["pages_spooled"] = stats["spooled"]
         client.submit_result(task_id, status="succeeded", result=result)
         pages = result.get("pages_crawled")
         tl.summary(status="succeeded", saved=stats["saved"], rejected=stats["rejected"],

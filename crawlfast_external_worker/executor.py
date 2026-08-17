@@ -198,6 +198,47 @@ def lite_fetch(task: dict, cfg, on_progress=None, on_page=None) -> dict:
             "task_type": task.get("task_type"), "pages_saved": 1 if saved else 0}
 
 
+@handler("crawl_pages")
+def crawl_pages(task: dict, cfg, on_progress=None, on_page=None) -> dict:
+    """Re-scrape a specific list of page URLs (payload.pages) — no BFS. Used by rescrape-failed to
+    retry only the pages that previously failed, without re-fetching the good ones."""
+    payload = task.get("payload") or {}
+    urls = [u for u in (payload.get("pages") or []) if u]
+    if not urls:
+        raise ValueError("crawl_pages task has no 'pages'")
+    started = time.time()
+    pages: list[dict] = []
+    errors = 0
+    saved = 0
+    total = len(urls)
+    for i, url in enumerate(urls, 1):
+        try:
+            page = _fetch(url, cfg)
+            html = page.pop("_html", "")
+            if _persist(on_page, page, html):
+                saved += 1
+            pages.append(_page_summary(page))
+        except Exception as exc:  # noqa: BLE001 — one bad page shouldn't abort the batch
+            errors += 1
+            pages.append({"url": url, "error": str(exc)})
+        if on_progress:
+            on_progress(done=i, total=total, current_url=url,
+                        title=(pages[-1].get("title") if pages else None))
+    elapsed_ms = int((time.time() - started) * 1000)
+    return {
+        "engine": "lite-crawl-pages",
+        "node": socket.gethostname(),
+        "task_type": task.get("task_type"),
+        "pages_crawled": len(pages),
+        "pages_saved": saved,
+        "links_found": total,          # for crawl_pages, "found" = the urls we were asked to retry
+        "errors": errors,
+        "elapsed_ms": elapsed_ms,
+        "elapsed_seconds": round(elapsed_ms / 1000, 2),
+        "pages": pages,
+    }
+
+
 @handler("crawl_all", "crawl", "crawl_sitemap")
 def full_crawl(task: dict, cfg, on_progress=None, on_page=None) -> dict:
     """BFS the whole site: crawl every same-host page up to max_pages, reporting progress per page.
@@ -211,7 +252,9 @@ def full_crawl(task: dict, cfg, on_progress=None, on_page=None) -> dict:
 
     started = time.time()
     seen: set[str] = set()
+    discovered: set[str] = set()   # every distinct same-host link found (crawled or still queued)
     queue: list[str] = [_normalize_url(start_url)]
+    discovered.add(queue[0])
     pages: list[dict] = []
     errors = 0
     saved = 0
@@ -229,6 +272,7 @@ def full_crawl(task: dict, cfg, on_progress=None, on_page=None) -> dict:
                 saved += 1
             pages.append(_page_summary(page))
             for link in _same_host_links(html, page["final_url"], host):
+                discovered.add(link)
                 if link not in seen and link not in queue:
                     queue.append(link)
         except Exception as exc:  # noqa: BLE001 — one bad page shouldn't abort the crawl
@@ -246,6 +290,7 @@ def full_crawl(task: dict, cfg, on_progress=None, on_page=None) -> dict:
         "task_type": task.get("task_type"),
         "pages_crawled": len(pages),
         "pages_saved": saved,              # pages whose HTML the server persisted (S3 + DB)
+        "links_found": len(discovered),    # distinct same-host links discovered by the BFS
         "errors": errors,
         "elapsed_ms": elapsed_ms,          # total time to clone the site (all pages)
         "elapsed_seconds": round(elapsed_ms / 1000, 2),
