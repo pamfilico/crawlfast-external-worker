@@ -27,7 +27,8 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
-import html  # stdlib — decode HTML entities in extracted hrefs (&amp; → &)
+from html import unescape as _html_unescape  # entity-decode hrefs (&amp;→&); aliased so the
+# `html` string param of _same_host_links can't shadow the module
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _META_RE = re.compile(
@@ -142,7 +143,7 @@ def _same_host_links(html: str, base_url: str, host: str) -> list[str]:
             # Decode HTML entities in the href BEFORE using it: `?a=1&amp;b=2` in the markup is the
             # URL `?a=1&b=2` — requesting the literal `&amp;` 404s (verified on orfanakisbike.gr,
             # 41/50 pages lost). Also handles &#38; / &#x26; etc.
-            href = html.unescape(raw_href)
+            href = _html_unescape(raw_href)
             if href.strip().lower().startswith(("mailto:", "tel:", "javascript:", "data:")):
                 continue
             absu = _normalize_url(urljoin(base_url, href).split("#")[0])
