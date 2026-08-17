@@ -21,6 +21,7 @@ creates the Page row — exactly like the native scraper). The returned result s
 from __future__ import annotations
 
 import re
+import os
 import socket
 import time
 from urllib.parse import urljoin, urlparse
@@ -102,11 +103,29 @@ def _title(html: str):
     return m.group(1).strip()[:300] if m else None
 
 
+def _retry_after_seconds(resp, cap=8.0):
+    """Parse a Retry-After header (seconds form) and cap it, so a 429/503 gets ONE polite wait+retry
+    instead of becoming a permanent failure. Ignores HTTP-date form (rare here) and absurd values."""
+    ra = (resp.headers.get("Retry-After") or "").strip()
+    try:
+        return max(0.0, min(float(ra), cap)) if ra else min(2.0, cap)
+    except ValueError:
+        return min(2.0, cap)
+
+
 def _fetch(url: str, cfg) -> dict:
     started = time.time()
     # 12s default (was 30) so a throttling/slow site can't hold a worker hostage for the full crawl.
     timeout = getattr(cfg, "request_timeout_seconds", 12.0)
     resp = requests.get(url, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
+    # Politeness / anti-rate-limit: on a 429/503, wait the (capped) Retry-After and retry ONCE. Most
+    # rate-limits are momentary — this turns a would-be failure into a save without hammering. Off
+    # via CRAWLFAST_WORKER_NO_RETRY=1.
+    if resp.status_code in (429, 503) and os.getenv("CRAWLFAST_WORKER_NO_RETRY") != "1":
+        wait = _retry_after_seconds(resp)
+        resp.close()
+        time.sleep(wait)
+        resp = requests.get(url, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
     # Only read/parse HTML. A non-HTML response (asset, PDF, binary) that slipped through has no
     # pages to follow — skip the body so we don't download megabytes or extract junk links.
     ctype = (resp.headers.get("Content-Type") or "").lower()
