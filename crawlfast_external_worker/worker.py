@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 
@@ -164,6 +165,14 @@ def main(argv=None) -> int:
     hb_interval = max(10.0, cfg.poll_interval_seconds)  # heartbeat ~every 10s, never per-task
     last_hb = 0.0
     idle = 0
+    # SELF-HEAL WATCHDOG: the except-below swallows all errors so a node never dies on a blip.
+    # But that means a *sustained* failure (claim keeps 500ing / connection wedged / a hung task)
+    # leaves the worker heartbeating forever while claiming nothing — the "online but running 0"
+    # zombie. So: if we make NO forward progress (no task processed) for WATCHDOG_IDLE_SECONDS
+    # while the queue is non-empty, exit non-zero. docker `restart: unless-stopped` then respawns
+    # a fresh worker (new connections) — self-healing with no operator/SSH needed.
+    watchdog_s = float(os.getenv("WORKER_WATCHDOG_IDLE_SECONDS", "600"))
+    last_progress = time.time()
     while True:
         try:
             now = time.time()
@@ -173,18 +182,28 @@ def main(argv=None) -> int:
                 spool.flush(client)  # retry any pages a prior timeout spooled to disk
             if process_one(client, cfg, spool, tlog):
                 idle = 0  # got work — loop straight back to claim the next (no sleep)
+                last_progress = now
             else:
                 # Empty right now, but a running job's frontier refills within ~1s as pages get
                 # crawled elsewhere — so retry FAST for a while before backing off to poll_interval.
                 idle += 1
+                # Prolonged no-progress = wedged worker (claims keep failing / connection stuck).
+                # The crawl queue is effectively always deep, so no-progress means broken, not idle.
+                if (now - last_progress) > watchdog_s:
+                    log.error("SELF-HEAL: no task processed in %.0fs — exiting for restart", now - last_progress)
+                    os._exit(1)
                 time.sleep(0.3 if idle < 20 else cfg.poll_interval_seconds)
         except KeyboardInterrupt:
             log.info("stopping")
             return 0
-        except Exception as exc:  # noqa: BLE001 — NEVER crash the node: API errors, dropped
-            # connections (e.g. a server reload), timeouts — log and keep polling.
+        except Exception as exc:  # noqa: BLE001 — NEVER crash the node on a blip: API errors,
+            # dropped connections (server reload), timeouts — log and keep polling. Sustained
+            # failure is caught by the watchdog above (no forward progress → restart).
             log.warning("transient error, continuing: %s", exc)
             last_hb = 0.0  # force a re-heartbeat next loop
+            if (time.time() - last_progress) > watchdog_s:
+                log.error("SELF-HEAL: sustained errors for %.0fs — exiting for restart", watchdog_s)
+                os._exit(1)
             time.sleep(cfg.poll_interval_seconds)
 
 
