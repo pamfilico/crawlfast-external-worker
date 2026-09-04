@@ -75,6 +75,34 @@ def _normalize_url(url: str) -> str:
     path = "/".join(out).rstrip("/")
     return f"{p.scheme}://{p.netloc}{path}" + (f"?{p.query}" if p.query else "")
 
+#: Pause between page fetches on ONE site, in seconds.
+#:
+#: The BFS walks a whole host back-to-back with no gap at all, which is what provokes the rate
+#: limiting we then record as a permanent "blocked". billysrentacar.gr answered 403 to every client
+#: we had after sustained probing and served 200 to all of them once left alone — the block was
+#: ours to cause.
+#:
+#: Default 0 keeps every deployed node byte-identical until it is set. The SERVER can raise it per
+#: task via ``payload.page_delay_seconds``, which is how a recrawl asks to be gentler than a first
+#: pass: by the time we are re-fetching a page, the site has already pushed back once.
+_PAGE_DELAY_ENV = "CRAWLFAST_WORKER_PAGE_DELAY_SECONDS"
+_MAX_PAGE_DELAY = 30.0
+
+
+def _page_delay(task: dict, cfg) -> float:
+    """Seconds to wait between pages: the task's own value wins, else the node default, else none."""
+    payload = task.get("payload") or {}
+    raw = payload.get("page_delay_seconds")
+    if raw is None:
+        raw = getattr(cfg, "page_delay_seconds", None)
+    if raw is None:
+        raw = os.getenv(_PAGE_DELAY_ENV, "0")
+    try:
+        return max(0.0, min(float(raw), _MAX_PAGE_DELAY))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 _HANDLERS: dict[str, callable] = {}
 
 
@@ -113,11 +141,82 @@ def _retry_after_seconds(resp, cap=8.0):
         return min(2.0, cap)
 
 
-def _fetch(url: str, cfg) -> dict:
+#: Pooled session for TARGET fetches, created on first use when the node opts in. A BFS walks 50
+#: pages of ONE host in sequence, and each page currently pays a fresh TCP+TLS handshake to a host
+#: it is already talking to — measured at ~220ms per page against a live target.
+_SESSION = None
+
+
+def _fetcher(cfg):
+    """Return the callable used to GET a page: a pooled Session when the node opted in, otherwise
+    the module-level ``requests`` (byte-for-byte the original behaviour)."""
+    global _SESSION
+    if not getattr(cfg, "http_session", False):
+        return requests
+    if _SESSION is None:
+        _SESSION = requests.Session()
+    return _SESSION
+
+
+class _Closed:
+    """Stand-in for a response that never arrived, so the fallback loop can close() uniformly."""
+
+    def close(self):
+        pass
+
+
+def _url_variants(url: str) -> list:
+    """The other spellings of the same root domain, in the order worth trying.
+
+    https before http (every canonical we see is https), then the opposite www-ness, then both.
+    Never invents a different host — only the scheme and the `www.` prefix change, so this can
+    reach a site that moved, never a site that is not the lead's.
+    """
+    p = urlparse(url)
+    host = p.netloc
+    other_host = host[4:] if host.startswith("www.") else f"www.{host}"
+    rest = url.split(p.netloc, 1)[1] if p.netloc in url else ""
+    out, seen = [], {url}
+    for scheme in ("https", "http"):
+        for h in (host, other_host):
+            candidate = f"{scheme}://{h}{rest}"
+            if candidate not in seen:
+                seen.add(candidate)
+                out.append(candidate)
+    return out
+
+
+def _fetch(url: str, cfg, try_variants: bool = False) -> dict:
     started = time.time()
+    http = _fetcher(cfg)
     # 12s default (was 30) so a throttling/slow site can't hold a worker hostage for the full crawl.
     timeout = getattr(cfg, "request_timeout_seconds", 12.0)
-    resp = requests.get(url, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
+    resp = http.get(url, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
+    # ROOT-DOMAIN FALLBACK. A lead carries whatever URL it was discovered with, and that is often
+    # not the one the site actually serves: billysrentacar.gr answered 403 on
+    # `http://www.billysrentacar.gr/` while `http://billysrentacar.gr/` returned 200 in the same
+    # crawl, and its own canonical is https. Writing the lead off as dead because of a stale `www.`
+    # or a stale `http://` throws away a perfectly good site.
+    #
+    # So on a 4xx/5xx, walk the other three spellings of the same root domain and keep the first
+    # that answers. Only ever runs AFTER a failure, so a healthy site costs exactly one request.
+    if resp.status_code >= 400 and try_variants and os.getenv("CRAWLFAST_WORKER_NO_URL_VARIANTS") != "1":
+        first = resp
+        for candidate in _url_variants(url):
+            first.close()
+            try:
+                alt = http.get(candidate, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
+            except requests.RequestException:
+                first = _Closed()
+                continue
+            if alt.status_code < 400:
+                url, resp = candidate, alt
+                break
+            first = alt
+        else:
+            # Nothing better than the original; re-fetch it so the caller reports the real failure.
+            first.close()
+            resp = http.get(url, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
     # Politeness / anti-rate-limit: on a 429/503, wait the (capped) Retry-After and retry ONCE. Most
     # rate-limits are momentary — this turns a would-be failure into a save without hammering. Off
     # via CRAWLFAST_WORKER_NO_RETRY=1.
@@ -125,7 +224,7 @@ def _fetch(url: str, cfg) -> dict:
         wait = _retry_after_seconds(resp)
         resp.close()
         time.sleep(wait)
-        resp = requests.get(url, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
+        resp = http.get(url, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
     # Only read/parse HTML. A non-HTML response (asset, PDF, binary) that slipped through has no
     # pages to follow — skip the body so we don't download megabytes or extract junk links.
     ctype = (resp.headers.get("Content-Type") or "").lower()
@@ -208,7 +307,7 @@ def lite_fetch(task: dict, cfg, on_progress=None, on_page=None) -> dict:
     url = (task.get("payload") or {}).get("url")
     if not url:
         raise ValueError("task payload has no 'url'")
-    page = _fetch(url, cfg)
+    page = _fetch(url, cfg, try_variants=True)
     html = page.pop("_html", "")
     saved = _persist(on_page, page, html)
     if on_progress:
@@ -230,9 +329,13 @@ def crawl_pages(task: dict, cfg, on_progress=None, on_page=None) -> dict:
     errors = 0
     saved = 0
     total = len(urls)
+    delay = _page_delay(task, cfg)
     for i, url in enumerate(urls, 1):
+        if delay and i > 1:
+            time.sleep(delay)
         try:
-            page = _fetch(url, cfg)
+            # A repair: the URL already failed once, so try the other spellings too.
+            page = _fetch(url, cfg, try_variants=True)
             html = page.pop("_html", "")
             if _persist(on_page, page, html):
                 saved += 1
@@ -278,13 +381,18 @@ def full_crawl(task: dict, cfg, on_progress=None, on_page=None) -> dict:
     errors = 0
     saved = 0
 
+    delay = _page_delay(task, cfg)
     while queue and len(pages) < max_pages:
         url = queue.pop(0)
         if url in seen:
             continue
+        if delay and pages:
+            time.sleep(delay)
         seen.add(url)
         try:
-            page = _fetch(url, cfg)
+            # Only the SEED gets the fallback ladder. Interior pages came from the site's own
+            # markup, so their spelling is already the site's own and a 404 there is a real 404.
+            page = _fetch(url, cfg, try_variants=not pages)
             html = page.pop("_html", "")
             # Ship the FULL html to the server to persist (S3 + Page row); keep the summary light.
             if _persist(on_page, page, html):

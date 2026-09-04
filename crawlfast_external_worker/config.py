@@ -17,6 +17,13 @@ except Exception:  # noqa: BLE001
     yaml = None
 
 
+def _flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class WorkerConfig:
     api_base_url: str
@@ -24,6 +31,26 @@ class WorkerConfig:
     worker_name: str = ""
     poll_interval_seconds: float = 5.0
     request_timeout_seconds: float = 30.0
+
+    # ── optional transport tuning (all OFF by default) ──────────────────────
+    # Every deployed node keeps its exact current behaviour unless it opts in, so these can ship
+    # without touching a single running worker.
+    #
+    #: Reuse one TCP+TLS connection instead of dialling per request. Measured on a live node:
+    #: a fresh API call costs 255-400ms, the same call on a warm connection costs 67ms — and the
+    #: worker makes ~2 API calls per page plus one fetch, all of them currently cold.
+    http_session: bool = False
+    #: gzip the page body and POST it to /tasks/<id>/page-compressed. Measured: 171,485 -> 30,448
+    #: bytes on a real page (5.6x). Only used when the SERVER advertises the feature, so pointing
+    #: an opted-in worker at an older backend is safe.
+    compress_pages: bool = False
+    #: Override the HTTP Host header. Needed only to reach a Caddy vhost by IP — on macOS a
+    #: ``*.local`` name costs ~5s in mDNS resolution per lookup, which would dwarf every timing
+    #: this worker is used to measure.
+    host_header: str = ""
+    #: Seconds to wait between page fetches on one site. 0 = the current back-to-back behaviour.
+    #: A per-task value from the server overrides this; see executor._page_delay.
+    page_delay_seconds: float = 0.0
 
     @property
     def base(self) -> str:
@@ -35,6 +62,9 @@ def load_config(path: str | None = None) -> WorkerConfig:
 
     Env overrides: CRAWLFAST_WORKER_API_BASE_URL, CRAWLFAST_WORKER_API_KEY,
     CRAWLFAST_WORKER_NAME, CRAWLFAST_WORKER_POLL_INTERVAL, CRAWLFAST_WORKER_TIMEOUT.
+
+    Optional transport flags (all default OFF, so an existing node is byte-for-byte unchanged):
+    CRAWLFAST_WORKER_HTTP_SESSION, CRAWLFAST_WORKER_COMPRESS_PAGES, CRAWLFAST_WORKER_HOST_HEADER.
     """
     data: dict = {}
     path = path or os.getenv("CRAWLFAST_WORKER_CONFIG", "config.yaml")
@@ -61,4 +91,12 @@ def load_config(path: str | None = None) -> WorkerConfig:
         worker_name=worker_name,
         poll_interval_seconds=float(poll),
         request_timeout_seconds=float(timeout),
+        http_session=_flag("CRAWLFAST_WORKER_HTTP_SESSION", bool(data.get("http_session", False))),
+        compress_pages=_flag("CRAWLFAST_WORKER_COMPRESS_PAGES", bool(data.get("compress_pages", False))),
+        host_header=os.getenv("CRAWLFAST_WORKER_HOST_HEADER") or data.get("host_header") or "",
+        page_delay_seconds=float(
+            os.getenv("CRAWLFAST_WORKER_PAGE_DELAY_SECONDS")
+            or data.get("page_delay_seconds")
+            or 0.0
+        ),
     )

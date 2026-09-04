@@ -133,10 +133,17 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)
-    client = CrawlfastWorkerClient(cfg.base, cfg.api_key, timeout=cfg.request_timeout_seconds)
+    client = CrawlfastWorkerClient(
+        cfg.base, cfg.api_key, timeout=cfg.request_timeout_seconds,
+        use_session=cfg.http_session, compress_pages=cfg.compress_pages,
+        host_header=cfg.host_header,
+    )
     spool = PageSpool()
     tlog = TaskLogger()
     log.info("crawlfast-external-worker v%s → %s", __version__, cfg.base)
+    if cfg.http_session or cfg.compress_pages:
+        log.info("transport opt-ins: http_session=%s compress_pages=%s",
+                 cfg.http_session, cfg.compress_pages)
 
     if args.health:
         try:
