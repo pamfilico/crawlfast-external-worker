@@ -298,3 +298,16 @@ ANDROID-NODE.md (Termux path)
 
 *Current version: `__version__` in `crawlfast_external_worker/__init__.py` (v0.3.3 — page persistence +
 durable spool + task-type pinning + fault injection + truthful save counts + per-lead/client JSONL logs).*
+
+## Tests
+
+```bash
+make test-worker          # from the repo root
+python -m pytest          # from here, with requirements-dev.txt installed
+```
+
+82 tests, ~8 seconds, no docker and no network: the suite serves its own fixture website and a fake
+crawlfast API on loopback, and refuses any connection that is not 127.0.0.1.
+
+Read `tests/README.md` before changing anything in `client.py` — the fleet's nodes cannot be
+redeployed remotely, so a protocol change that ships is fixed by visiting each machine.

@@ -5,3 +5,4 @@ __pycache__/
 *.egg-info/
 logs/
 .page-spool/
+.pytest_cache/

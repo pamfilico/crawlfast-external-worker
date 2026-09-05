@@ -231,16 +231,17 @@ def _fetch(url: str, cfg, try_variants: bool = False) -> dict:
     is_html = "html" in ctype or ctype == ""
     html = ""
     if is_html:
-        # Cap the body (~3MB) so a pathological page can't blow up memory/time.
+        # Cap the body (~3MB) so a pathological page can't blow up memory/time. Read BYTES and
+        # decode them ourselves — see _decode_html for why requests' own decoding cannot be used.
         chunks, size = [], 0
-        for chunk in resp.iter_content(chunk_size=65536, decode_unicode=True):
+        for chunk in resp.iter_content(chunk_size=65536):
             if not chunk:
                 continue
-            chunks.append(chunk if isinstance(chunk, str) else chunk.decode("utf-8", "ignore"))
-            size += len(chunks[-1])
+            chunks.append(chunk)
+            size += len(chunk)
             if size > 3_000_000:
                 break
-        html = "".join(chunks)
+        html = _decode_html(b"".join(chunks), resp.headers.get("Content-Type"))
     resp.close()
     return {
         "url": url,
@@ -252,6 +253,56 @@ def _fetch(url: str, cfg, try_variants: bool = False) -> dict:
         "meta": _extract_meta(html),
         "_html": html,
     }
+
+
+_META_CHARSET_RE = re.compile(
+    rb"""<meta[^>]+charset\s*=\s*["']?\s*([a-zA-Z0-9_\-]+)""", re.I
+)
+
+
+def _header_charset(content_type: str | None) -> str | None:
+    for part in (content_type or "").split(";")[1:]:
+        key, _, value = part.partition("=")
+        if key.strip().lower() == "charset":
+            return value.strip().strip("\"'") or None
+    return None
+
+
+def _decode_html(raw: bytes, content_type: str | None) -> str:
+    """Bytes -> text, resolving the charset the way a browser does.
+
+    NOT `resp.text` and NOT `iter_content(decode_unicode=True)`. Both use `resp.encoding`, and
+    requests follows RFC 2616 by defaulting a `text/*` response with no charset parameter to
+    **ISO-8859-1**. Most sites send exactly that header and declare their real charset in a
+    `<meta charset="utf-8">` instead — so every non-ASCII character on such a page came back
+    mojibake ("Ελλάδα" -> "Î•Î»Î»Î¬Î´Î±") and was stored that way, in S3 and in every title and
+    meta description read from it. On a crawler pointed mostly at Greek sites that is most of the
+    corpus.
+
+    Order of authority, highest first:
+      1. the charset in the Content-Type header — the server said so explicitly;
+      2. a `<meta charset>` / `<meta http-equiv>` declaration in the document;
+      3. UTF-8, accepted only if the whole body decodes cleanly (a strict decode IS the test);
+      4. cp1252, which maps every byte and so can never raise.
+    """
+    if not raw:
+        return ""
+
+    declared = _header_charset(content_type)
+    if not declared:
+        match = _META_CHARSET_RE.search(raw[:4096])
+        if match:
+            declared = match.group(1).decode("ascii", "ignore")
+
+    for candidate in (declared, "utf-8"):
+        if not candidate:
+            continue
+        try:
+            return raw.decode(candidate)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    # Last resort: a single-byte codec with no undefined slots, so this always returns something.
+    return raw.decode("cp1252", "replace")
 
 
 def _same_host_links(html: str, base_url: str, host: str) -> list[str]:

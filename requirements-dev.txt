@@ -1,0 +1,4 @@
+# Test-only dependencies for the worker's own suite. The runtime needs nothing but
+# requirements.txt — the node image installs that and no more.
+-r requirements.txt
+pytest==8.3.4
