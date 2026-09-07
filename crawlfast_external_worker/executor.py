@@ -24,6 +24,7 @@ import re
 import os
 import socket
 import time
+import datetime as _dt
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -37,15 +38,87 @@ _META_RE = re.compile(
     re.IGNORECASE,
 )
 _HREF_RE = re.compile(r'href=["\']([^"\'#]+)["\']', re.IGNORECASE)
-# Browser-shaped UA: many sites' WAFs 403 a bot-identifying UA (or python-requests) but serve 200
-# to a browser (verified on boatrentalrethymno.gr — bot UA=403, browser UA=200). Crawling public
-# pages with a normal UA is standard; it recovers UA-gated sites that otherwise "fail" with 0 pages.
+# Browser-shaped request headers: many sites' WAFs 403 a bot-identifying UA (or python-requests)
+# but serve 200 to a browser (verified on boatrentalrethymno.gr — bot UA=403, browser UA=200).
+# Crawling public pages with a normal browser shape is standard; it recovers gated sites that
+# otherwise "fail" with 0 pages.
+#
+# A UA STRING ALONE IS NOT ENOUGH, and this was expensive to learn. enterprise.nl (Akamai) recorded
+# 47 failed pages, every one `http 403`. Reproduced from a laptop against the live site, one request
+# a minute so nothing could be blamed on rate limiting:
+#
+#     worker's three headers, Chrome/124 ............ 403   (371 bytes, "Access Denied")
+#     full browser headers,   Chrome/139 ............ 200   (481 KB)
+#     full browser headers MINUS Sec-Fetch-* ........ 403
+#     full browser headers,   Chrome/124 ............ 403   <- only the version differs
+#     full browser headers,   Chrome/139 ............ 200
+#
+# Same IP, same TLS stack, seconds apart. Two independent things move the verdict:
+#
+#   1. the fetch-metadata headers (`Sec-Fetch-*`) — every real navigation sends them, so their
+#      absence is by itself a bot signal;
+#   2. the Chrome major version — it must be one a real browser could still be reporting.
+#
+# It behaves like a SCORE, not a rulebook. Dropping any single header from the working set still
+# returned 200; dropping three at once did not. So the goal is not to satisfy a checklist but to
+# stop looking unusual, which is why the set below is a whole browser's worth rather than the
+# minimum that happened to pass on the day.
+#
+# What it is NOT is pacing. The obvious theory — a BFS hammering fifty pages with no gap — is
+# wrong here: 20 pages of this same origin, back to back with zero delay, all returned 200 once
+# the headers were right. Page delay is still worth having for origins that genuinely rate-limit,
+# but it would not have recovered a single one of these 47 pages.
+#
+# (2) is the trap, because it is not a bug that was written — it is a bug that ARRIVED. `Chrome/124`
+# was current when it was pinned and was answered 200. It aged into a 403 while the file sat
+# untouched. Nothing about the crawler changed; the world moved and the constant did not.
+#
+# Hence `_UA_PINNED_ON` and the test that fails when it goes stale: the only defence against a
+# constant that rots is to make its age visible to CI. Bump `_CHROME_MAJOR` to whatever a current
+# desktop Chrome reports and move the date with it.
+_CHROME_MAJOR = 152
+#: Day `_CHROME_MAJOR` was last checked against a real browser. See
+#: `tests/test_headers.py::test_the_pinned_chrome_version_has_not_gone_stale`.
+_UA_PINNED_ON = _dt.date(2026, 9, 8)
+#: How long a pin may go unreviewed before CI fails. Chrome ships a major roughly every four weeks,
+#: so six months is ~6-7 versions behind — still plausible, well before the cliff that caught us.
+_UA_MAX_AGE_DAYS = 180
+
 _UA = {
-    "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-                   "Chrome/124.0.0.0 Safari/537.36"),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "User-Agent": (f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                   f"Chrome/{_CHROME_MAJOR}.0.0.0 Safari/537.36"),
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,"
+               "image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"),
     "Accept-Language": "en-US,en;q=0.9",
+    "sec-ch-ua": (f'"Chromium";v="{_CHROME_MAJOR}", "Not=A?Brand";v="24", '
+                  f'"Google Chrome";v="{_CHROME_MAJOR}"'),
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Linux"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    # Overridden per request by _headers(): `none` is what a browser sends for a URL typed into the
+    # address bar, which is the honest description of a seed URL and the only thing we can claim
+    # for one. See _headers for why an interior page must say something else.
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
+# Deliberately NOT set: `Accept-Encoding`. requests/urllib3 negotiates what it can actually decode,
+# and advertising `br`/`zstd` we cannot decompress buys a body of binary noise. Proven irrelevant
+# to the block above (removing it from the working set still returned 200).
+
+
+def _headers(referer: str | None = None) -> dict:
+    """Request headers for one fetch, describing how we arrived at this URL.
+
+    A browser sends `Sec-Fetch-Site: none` only for a URL the user typed. Every page reached by
+    clicking a link carries `same-origin` and a `Referer`. A BFS that claims fifty consecutive
+    typed navigations to one host is describing something no human does — so interior pages say
+    what actually happened: they were reached from the page that linked to them.
+    """
+    if not referer:
+        return _UA
+    return {**_UA, "Referer": referer, "Sec-Fetch-Site": "same-origin", "Sec-Fetch-User": "?1"}
 # Non-page extensions to skip. Superset of the native scraper's image/pdf exclusion
 # (.jpg/.jpeg/.png/.gif/.svg/.webp/.ico/.bmp/.tiff/.avif/.pdf) — matched for parity — PLUS the
 # asset types a non-browser GET crawler must skip itself (css/js/fonts/media/data) that the native
@@ -186,12 +259,13 @@ def _url_variants(url: str) -> list:
     return out
 
 
-def _fetch(url: str, cfg, try_variants: bool = False) -> dict:
+def _fetch(url: str, cfg, try_variants: bool = False, referer: str | None = None) -> dict:
     started = time.time()
+    headers = _headers(referer)
     http = _fetcher(cfg)
     # 12s default (was 30) so a throttling/slow site can't hold a worker hostage for the full crawl.
     timeout = getattr(cfg, "request_timeout_seconds", 12.0)
-    resp = http.get(url, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
+    resp = http.get(url, timeout=timeout, headers=headers, allow_redirects=True, stream=True)
     # ROOT-DOMAIN FALLBACK. A lead carries whatever URL it was discovered with, and that is often
     # not the one the site actually serves: billysrentacar.gr answered 403 on
     # `http://www.billysrentacar.gr/` while `http://billysrentacar.gr/` returned 200 in the same
@@ -205,7 +279,7 @@ def _fetch(url: str, cfg, try_variants: bool = False) -> dict:
         for candidate in _url_variants(url):
             first.close()
             try:
-                alt = http.get(candidate, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
+                alt = http.get(candidate, timeout=timeout, headers=headers, allow_redirects=True, stream=True)
             except requests.RequestException:
                 first = _Closed()
                 continue
@@ -216,7 +290,7 @@ def _fetch(url: str, cfg, try_variants: bool = False) -> dict:
         else:
             # Nothing better than the original; re-fetch it so the caller reports the real failure.
             first.close()
-            resp = http.get(url, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
+            resp = http.get(url, timeout=timeout, headers=headers, allow_redirects=True, stream=True)
     # Politeness / anti-rate-limit: on a 429/503, wait the (capped) Retry-After and retry ONCE. Most
     # rate-limits are momentary — this turns a would-be failure into a save without hammering. Off
     # via CRAWLFAST_WORKER_NO_RETRY=1.
@@ -224,7 +298,7 @@ def _fetch(url: str, cfg, try_variants: bool = False) -> dict:
         wait = _retry_after_seconds(resp)
         resp.close()
         time.sleep(wait)
-        resp = http.get(url, timeout=timeout, headers=_UA, allow_redirects=True, stream=True)
+        resp = http.get(url, timeout=timeout, headers=headers, allow_redirects=True, stream=True)
     # Only read/parse HTML. A non-HTML response (asset, PDF, binary) that slipped through has no
     # pages to follow — skip the body so we don't download megabytes or extract junk links.
     ctype = (resp.headers.get("Content-Type") or "").lower()
@@ -426,15 +500,17 @@ def full_crawl(task: dict, cfg, on_progress=None, on_page=None) -> dict:
     started = time.time()
     seen: set[str] = set()
     discovered: set[str] = set()   # every distinct same-host link found (crawled or still queued)
-    queue: list[str] = [_normalize_url(start_url)]
-    discovered.add(queue[0])
+    # (url, referer) — the referer is the page whose markup produced this link, or None for the
+    # seed. It is what lets an interior fetch describe itself as a click rather than a typed URL.
+    queue: list[tuple[str, str | None]] = [(_normalize_url(start_url), None)]
+    discovered.add(queue[0][0])
     pages: list[dict] = []
     errors = 0
     saved = 0
 
     delay = _page_delay(task, cfg)
     while queue and len(pages) < max_pages:
-        url = queue.pop(0)
+        url, referer = queue.pop(0)
         if url in seen:
             continue
         if delay and pages:
@@ -443,16 +519,19 @@ def full_crawl(task: dict, cfg, on_progress=None, on_page=None) -> dict:
         try:
             # Only the SEED gets the fallback ladder. Interior pages came from the site's own
             # markup, so their spelling is already the site's own and a 404 there is a real 404.
-            page = _fetch(url, cfg, try_variants=not pages)
+            page = _fetch(url, cfg, try_variants=not pages, referer=referer)
             html = page.pop("_html", "")
             # Ship the FULL html to the server to persist (S3 + Page row); keep the summary light.
             if _persist(on_page, page, html):
                 saved += 1
             pages.append(_page_summary(page))
-            for link in _same_host_links(html, page["final_url"], host):
+            found_on = page["final_url"]
+            queued = {u for u, _ in queue}
+            for link in _same_host_links(html, found_on, host):
                 discovered.add(link)
-                if link not in seen and link not in queue:
-                    queue.append(link)
+                if link not in seen and link not in queued:
+                    queue.append((link, found_on))
+                    queued.add(link)
         except Exception as exc:  # noqa: BLE001 — one bad page shouldn't abort the crawl
             errors += 1
             pages.append({"url": url, "error": str(exc)})

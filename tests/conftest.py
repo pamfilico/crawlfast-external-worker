@@ -84,6 +84,10 @@ class FakeSite:
     def __init__(self):
         self.rules: dict[str, dict] = {}
         self.hits: list[str] = []
+        #: (path, headers) for every request received, in order. The crawler's request SHAPE is
+        #: load-bearing — a missing Sec-Fetch-* header is the difference between 200 and 403 on a
+        #: WAF-protected origin — so the fixture has to be able to see what we actually sent.
+        self.requests: list[tuple[str, dict]] = []
         self.url = ""
 
     def set(self, path: str, *, status=None, content_type=None, body=None, headers=None):
@@ -94,9 +98,18 @@ class FakeSite:
     def reset(self):
         self.rules.clear()
         self.hits.clear()
+        self.requests.clear()
 
     def fetched(self, suffix: str) -> int:
         return sum(1 for h in self.hits if h.endswith(suffix))
+
+    def headers_for(self, path: str) -> dict:
+        """Headers of the first request for ``path``. Header names are matched case-insensitively,
+        because HTTP is and a test that cares about `Sec-Fetch-Mode` must not care about its case."""
+        for hit, headers in self.requests:
+            if hit == path:
+                return {k.lower(): v for k, v in headers.items()}
+        raise AssertionError(f"{path!r} was never requested; got {[h for h, _ in self.requests]}")
 
 
 @pytest.fixture(scope="session")
@@ -117,6 +130,7 @@ def _site_server(_site_state):
 
         def do_GET(self):
             state.hits.append(self.path)
+            state.requests.append((self.path, dict(self.headers.items())))
             rule = state.rules.get(self.path)
             if rule is None:
                 return super().do_GET()
