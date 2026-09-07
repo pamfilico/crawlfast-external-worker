@@ -16,6 +16,7 @@ a test suite for it must never be one typo away from crawling the internet.
 from __future__ import annotations
 
 import http.server
+import re
 import socket
 import threading
 from pathlib import Path
@@ -154,6 +155,100 @@ def site(_site_server):
     """The fixture website, reset between tests."""
     _site_server.reset()
     return _site_server
+
+
+# ── an origin that judges the request, not the URL ──────────────────────────────────────────
+#: Below this Chrome major the fixture refuses, the way enterprise.nl's Akamai refused `Chrome/124`
+#: while answering `Chrome/139` from the same IP seconds later. Fixed, low, and deliberately far
+#: from the pinned version: this is a floor that catches rot, not a mirror of the real threshold
+#: (which is not ours to know and would make the test a guess about someone else's config).
+WAF_MIN_CHROME = 130
+
+#: Byte-for-byte the shape Akamai actually returned — a short HTML deny page, not an empty body,
+#: because "we got 371 bytes of HTML" is exactly what made this failure look like a real page to
+#: everything that only checked whether a response arrived.
+WAF_DENY_BODY = (
+    b"<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n"
+    b"You don't have permission to access this server.<P>\n</BODY>\n</HTML>\n"
+)
+
+
+class WafSite(FakeSite):
+    """The fixture site behind a bot manager modelled on the one that cost us enterprise.nl.
+
+    It enforces the two conditions that were established by experiment against the live origin,
+    one request a minute so rate limiting could not account for any of it:
+
+      * the fetch-metadata headers must be present  (removing them: 200 -> 403)
+      * the Chrome major must not be ancient        (124 -> 403, 139 -> 200, nothing else changed)
+
+    This is a MODEL of observed behaviour, not a reimplementation of Akamai — it cannot tell us
+    what that vendor will do next. What it can do is fail the day our request stops looking like a
+    browser, which is the failure that actually happened and that nothing else in the suite could
+    see. `test_the_fixture_waf_really_does_block` keeps it honest: a WAF that lets everything
+    through would make every other test here pass while proving nothing.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.denied: list[str] = []
+
+    @staticmethod
+    def verdict(headers: dict) -> str | None:
+        """None to serve the page, or the reason it is refused."""
+        lower = {k.lower(): v for k, v in headers.items()}
+        if not any(k.startswith("sec-fetch") for k in lower):
+            return "no fetch-metadata headers"
+        match = re.search(r"Chrome/(\d+)\.", lower.get("user-agent", ""))
+        if not match:
+            return "no recognisable browser version"
+        if int(match.group(1)) < WAF_MIN_CHROME:
+            return f"Chrome/{match.group(1)} is too old"
+        return None
+
+
+@pytest.fixture(scope="session")
+def _waf_state():
+    return WafSite()
+
+
+@pytest.fixture(scope="session")
+def _waf_server(_waf_state):
+    state = _waf_state
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=str(FIXTURE_SITE), **kw)
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            state.hits.append(self.path)
+            state.requests.append((self.path, dict(self.headers.items())))
+            reason = state.verdict(self.headers)
+            if reason is None:
+                return super().do_GET()
+            state.denied.append(self.path)
+            self.send_response(403)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(WAF_DENY_BODY)))
+            self.send_header("Server", "AkamaiGHost")
+            self.end_headers()
+            self.wfile.write(WAF_DENY_BODY)
+
+    url, server = _serve(Handler)
+    state.url = url
+    yield state
+    server.shutdown()
+
+
+@pytest.fixture
+def waf(_waf_server):
+    """The fixture website, served by an origin that scores the request shape."""
+    _waf_server.reset()
+    _waf_server.denied.clear()
+    return _waf_server
 
 
 # ── the crawlfast external-worker API ───────────────────────────────────────────────────────
