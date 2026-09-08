@@ -67,3 +67,36 @@ The poll loop swallows transient errors (never die on a blip) but a **watchdog**
 after `WORKER_WATCHDOG_IDLE_SECONDS` (default 600) of no task processed → `restart: unless-stopped`
 respawns a fresh worker. So a wedged claim loop now heals itself with no SSH. To activate a code
 change on nodes: node self-update (git pull + rebuild) or `docker compose up -d --build worker`.
+
+## The browser fingerprint (a constant that expires)
+
+The node fetches pages with a **pinned Chrome version**. That pin is not a style choice — it is the
+difference between a crawl and a wall of `403`s, and it goes stale on its own.
+
+`Chrome/124` was current when it was pinned and was answered `200`. It aged into a total block from
+Akamai-fronted origins while the file sat untouched: no commit, no deploy, nothing changed on our
+side. It cost **2,947 pages across 100+ hosts** before anyone looked.
+
+```python
+# crawlfast_external_worker/executor.py
+_CHROME_MAJOR = 152          # what a real desktop Chrome reports
+_UA_PINNED_ON = date(2026, 9, 8)   # when that was last checked
+_UA_MAX_AGE_DAYS = 180
+```
+
+**If CI fails `test_the_pinned_chrome_version_has_not_gone_stale`:** open a real Chrome, read
+`chrome://version`, set `_CHROME_MAJOR` to that major and `_UA_PINNED_ON` to today. That is the
+whole fix. Do not silence the test — its only job is to fire before the cliff.
+
+**Symptom on the fleet:** pages failing with `http 403` in clusters, several hosts at once, while
+`errors == 0` on every task (a 403 is a successful HTTP exchange, so nothing raises). Confirm with:
+
+```
+GET /api/v1/internal/crawl-failure-reasons?hours=720&status=403     # on crawlfast-backend
+```
+
+If one host shows dozens of blocked pages, that is one problem with one fix, not dozens of dead
+sites. Note that pacing is the intuitive cause and usually the wrong one — `429`, not `403`, is the
+status that means slow down.
+
+Full writeup: **`CRAWL_BLOCKING.md`** at the monorepo root.
