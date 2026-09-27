@@ -19,6 +19,27 @@ ssh crawlfast-nodeN@crawlfast-nodeN.local 'cd crawlfast-external-worker && docke
 # logs:  docker compose logs -f worker      # or: journalctl -u crawlfast-worker -f
 ```
 
+## Server URL namespace (provider-shaped)
+
+The server serves the fleet's runtime surface under TWO prefixes, same view functions:
+
+- `/api/v1/crawler/crawlfast/*` — the provider-shaped namespace, what new nodes should use.
+  A second crawler slots in as `/api/v1/crawler/<provider>/*` without touching this one.
+- `/api/v1/external-worker/*` — the legacy prefix. Kept because nodes in the field call fixed
+  URLs; **do not remove it until every node has migrated.**
+
+**Migrate a node** by setting one value (env or `config.yaml`), then restarting the worker:
+
+```bash
+# env:                 CRAWLFAST_WORKER_API_PREFIX=/api/v1/crawler/crawlfast
+# or config.yaml:      api_prefix: /api/v1/crawler/crawlfast
+ssh crawlfast-nodeN@crawlfast-nodeN.local 'cd crawlfast-external-worker && docker compose restart worker'
+```
+
+Default (unset) = the legacy prefix, so an un-migrated node is byte-for-byte unchanged. The client
+threads this through every call (`crawlfast_external_worker/client.py::api`); pinned by
+`tests/test_client_protocol.py`.
+
 ## Check the fleet (the ONLY correct status source)
 ```
 docker exec suite_local_crawlfast_backend python -c "import urllib.request,json;d=json.load(urllib.request.urlopen('http://localhost:5000/api/v1/internal/external-workers',timeout=15))['data'];print('live',d['live_count'],'queue',d['queue']);[print(w['name'],w['status'],'seen',w['seconds_since_seen'],'s running',w['running']) for w in d['workers'] if w['seconds_since_seen']<1800]"

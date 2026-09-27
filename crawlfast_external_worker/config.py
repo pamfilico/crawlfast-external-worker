@@ -48,6 +48,10 @@ class WorkerConfig:
     #: ``*.local`` name costs ~5s in mDNS resolution per lookup, which would dwarf every timing
     #: this worker is used to measure.
     host_header: str = ""
+    #: Server surface the calls hang off. Empty = the client's legacy default
+    #: (/api/v1/external-worker). Set to /api/v1/crawler/crawlfast to move a node
+    #: onto the provider-shaped namespace; the server serves both.
+    api_prefix: str = ""
     #: Seconds to wait between page fetches on one site. 0 = the current back-to-back behaviour.
     #: A per-task value from the server overrides this; see executor._page_delay.
     page_delay_seconds: float = 0.0
@@ -94,6 +98,7 @@ def load_config(path: str | None = None) -> WorkerConfig:
         http_session=_flag("CRAWLFAST_WORKER_HTTP_SESSION", bool(data.get("http_session", False))),
         compress_pages=_flag("CRAWLFAST_WORKER_COMPRESS_PAGES", bool(data.get("compress_pages", False))),
         host_header=os.getenv("CRAWLFAST_WORKER_HOST_HEADER") or data.get("host_header") or "",
+        api_prefix=os.getenv("CRAWLFAST_WORKER_API_PREFIX") or data.get("api_prefix") or "",
         page_delay_seconds=float(
             os.getenv("CRAWLFAST_WORKER_PAGE_DELAY_SECONDS")
             or data.get("page_delay_seconds")

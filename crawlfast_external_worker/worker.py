@@ -137,6 +137,7 @@ def main(argv=None) -> int:
         cfg.base, cfg.api_key, timeout=cfg.request_timeout_seconds,
         use_session=cfg.http_session, compress_pages=cfg.compress_pages,
         host_header=cfg.host_header,
+        api_prefix=cfg.api_prefix,
     )
     spool = PageSpool()
     tlog = TaskLogger()

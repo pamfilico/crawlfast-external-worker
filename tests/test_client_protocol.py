@@ -172,3 +172,25 @@ def test_the_host_header_override_is_sent(cfg, api):
     client = CrawlfastWorkerClient(cfg.base, cfg.api_key, host_header="api.crawlfast.local")
     client.heartbeat()
     assert api.headers_seen[-1].get("Host") == "api.crawlfast.local"
+
+
+# ── the provider-shaped namespace migration ───────────────────────────────────────────────────
+def test_default_prefix_is_the_legacy_surface():
+    """A node that sets no api_prefix must call the exact legacy paths — the whole fleet relies on
+    it, and the server keeps that surface alive precisely so nodes can migrate on their own clock."""
+    c = CrawlfastWorkerClient("http://server", "k")
+    assert c.api == "/api/v1/external-worker"
+
+
+def test_api_prefix_moves_every_path_at_once():
+    """Migrating a node onto /api/v1/crawler/crawlfast is one config value, not a code change.
+
+    The server serves the same views under both prefixes, so a node flips WORKER_API_PREFIX and
+    nothing else moves. This pins that the client actually threads it through rather than keeping a
+    hardcoded path somewhere.
+    """
+    c = CrawlfastWorkerClient("http://server", "k", api_prefix="/api/v1/crawler/crawlfast")
+    assert c.api == "/api/v1/crawler/crawlfast"
+    # A trailing slash on the configured prefix must not double up in the URL.
+    c2 = CrawlfastWorkerClient("http://server", "k", api_prefix="/api/v1/crawler/crawlfast/")
+    assert c2.api == "/api/v1/crawler/crawlfast"

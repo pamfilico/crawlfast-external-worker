@@ -40,9 +40,17 @@ FEATURE_COMPRESSED_PAGES = "page-compressed"
 
 
 class CrawlfastWorkerClient:
+    #: The server surface these paths hang off. Defaults to the legacy prefix so a node that sets
+    #: nothing behaves exactly as before. The server now also serves the SAME views under
+    #: ``/api/v1/crawler/crawlfast`` (a provider-shaped namespace, extensible to other crawlers);
+    #: to migrate a node, set ``api_prefix`` there. One value moves every call below.
+    DEFAULT_API_PREFIX = "/api/v1/external-worker"
+
     def __init__(self, base_url: str, api_key: str, timeout: float = 30.0,
-                 use_session: bool = False, compress_pages: bool = False, host_header: str = ""):
+                 use_session: bool = False, compress_pages: bool = False, host_header: str = "",
+                 api_prefix: str = ""):
         self.base = base_url.rstrip("/")
+        self.api = (api_prefix or self.DEFAULT_API_PREFIX).rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
         self.host_header = host_header or ""
@@ -87,16 +95,16 @@ class CrawlfastWorkerClient:
 
     def health(self) -> dict:
         """Unauthenticated liveness of the worker endpoint group."""
-        return self._send("GET", "/api/v1/external-worker/health", auth=False)
+        return self._send("GET", f"{self.api}/health", auth=False)
 
     def heartbeat(self, worker_version: str = "", capabilities: list | None = None) -> dict:
         payload = {"worker_version": worker_version}
         if capabilities is not None:
             payload["capabilities"] = capabilities
-        return self._send("POST", "/api/v1/external-worker/heartbeat", json=payload)
+        return self._send("POST", f"{self.api}/heartbeat", json=payload)
 
     def claim_task(self) -> dict | None:
-        data = self._send("POST", "/api/v1/external-worker/tasks/claim", json={})
+        data = self._send("POST", f"{self.api}/tasks/claim", json={})
         return (data or {}).get("task")
 
     def report_progress(self, task_id: str, done: int, total: int, current_url: str = None,
@@ -105,7 +113,7 @@ class CrawlfastWorkerClient:
         try:
             self._request(
                 "POST",
-                f"{self.base}/api/v1/external-worker/tasks/{task_id}/progress",
+                f"{self.base}{self.api}/tasks/{task_id}/progress",
                 json={"done": done, "total": total, "current_url": current_url, "title": title},
                 headers=self._headers(),
                 timeout=self.timeout,
@@ -119,12 +127,12 @@ class CrawlfastWorkerClient:
         caller can count/log it — a page reported crawled but not saved is the exact bug this fixes."""
         _maybe_inject_page_fault()
         if not self._compression_available():
-            return self._send("POST", f"/api/v1/external-worker/tasks/{task_id}/page",
+            return self._send("POST", f"{self.api}/tasks/{task_id}/page",
                               json={"page": page})
 
         body = gzip.compress(json.dumps({"page": page}).encode("utf-8"), 6)
         headers = {**self._headers(), "Content-Encoding": "gzip"}
-        url = f"{self.base}/api/v1/external-worker/tasks/{task_id}/page-compressed"
+        url = f"{self.base}{self.api}/tasks/{task_id}/page-compressed"
         try:
             resp = self._request("POST", url, data=body, headers=headers, timeout=self.timeout)
         except requests.exceptions.RequestException as exc:
@@ -134,7 +142,7 @@ class CrawlfastWorkerClient:
         if resp.status_code in (404, 405):
             log.warning("server has no /page-compressed route; falling back to /page permanently")
             self._server_supports_compression = False
-            return self._send("POST", f"/api/v1/external-worker/tasks/{task_id}/page",
+            return self._send("POST", f"{self.api}/tasks/{task_id}/page",
                               json={"page": page})
         try:
             payload = resp.json()
@@ -165,6 +173,6 @@ class CrawlfastWorkerClient:
 
     def submit_result(self, task_id: str, status: str, result=None, error: str = None) -> dict:
         return self._send(
-            "POST", f"/api/v1/external-worker/tasks/{task_id}/result",
+            "POST", f"{self.api}/tasks/{task_id}/result",
             json={"status": status, "result": result, "error": error},
         )
